@@ -121,7 +121,7 @@ export function registerInsforgeTools(server: McpServer, config: ToolsConfig = {
   // --------------------------------------------------
 
   server.tool(
-    'get-docs',
+    'fetch-docs',
     'Fetch Insforge documentation. Use "instructions" for essential backend setup (MANDATORY FIRST), or select specific SDK docs for database, auth, storage, functions, or AI integration.',
     {
       docType: z
@@ -130,7 +130,7 @@ export function registerInsforgeTools(server: McpServer, config: ToolsConfig = {
           'Documentation type: "instructions" (essential backend setup - use FIRST), "db-sdk" (database operations), "auth-sdk" (authentication), "storage-sdk" (file storage), "functions-sdk" (edge functions), "ai-integration-sdk" (AI features)'
         ),
     },
-    withUsageTracking('get-docs', async ({ docType }) => {
+    withUsageTracking('fetch-docs', async ({ docType }) => {
       try {
         const content = await fetchDocumentation(docType);
         return {
