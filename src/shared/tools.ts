@@ -6,6 +6,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { handleApiResponse, formatSuccessMessage } from './response-handler.js';
 import { UsageTracker } from './usage-tracker.js';
+import { getWorkspaceRoot } from './context.js';
 import {
   CreateBucketRequest,
   createBucketRequestSchema,
@@ -537,9 +538,17 @@ export function registerInsforgeTools(server: McpServer, config: ToolsConfig = {
         const targetDir = projectName || `insforge-${frame}`;
         const command = `npx create-insforge-app ${targetDir}  --frame ${frame} --base-url ${API_BASE_URL} --anon-key ${anonKey}`;
 
-        // Execute the npx command (will use MCP server's cwd, which may not be user's workspace)
+        // Get workspace root from client (via roots/list) or fallback to process.cwd()
+        const workspaceRoot = getWorkspaceRoot();
+        const cwd = workspaceRoot || process.cwd();
+
+        console.error(`[download-template] Using working directory: ${cwd}`);
+        console.error(`[download-template] Workspace root from client: ${workspaceRoot || 'not available'}`);
+
+        // Execute the npx command in the workspace directory
         const { stdout, stderr } = await execAsync(command, {
           maxBuffer: 10 * 1024 * 1024, // 10MB buffer
+          cwd: cwd,
         });
 
         // Check if command was successful (basic validation)
