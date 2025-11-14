@@ -25,16 +25,16 @@ const toolsConfig = registerInsforgeTools(server, {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  
+
   // Log startup information to stderr (stdout is reserved for MCP protocol)
   console.error('Insforge MCP server started');
-  
+
   if (toolsConfig.apiKey) {
     console.error(`API Key: Configured`);
   } else {
     console.error('API Key: Not configured (will require api_key in tool calls)');
   }
-  
+
   console.error(`API Base URL: ${toolsConfig.apiBaseUrl}`);
   console.error(`Tools registered: ${toolsConfig.toolCount}`);
 }

@@ -515,12 +515,8 @@ export function registerInsforgeTools(server: McpServer, config: ToolsConfig = {
         .string()
         .optional()
         .describe('Name for the project directory (optional, defaults to "insforge-react")'),
-      workingDirectory: z
-        .string()
-        .optional()
-        .describe('Working directory path where project should be created'),
     },
-    withUsageTracking('download-template', async ({ frame, projectName, workingDirectory }) => {
+    withUsageTracking('download-template', async ({ frame, projectName }) => {
       try {
         // Get the anon key from backend
         const response = await fetch(`${API_BASE_URL}/api/auth/tokens/anon`, {
@@ -539,13 +535,11 @@ export function registerInsforgeTools(server: McpServer, config: ToolsConfig = {
         }
 
         const targetDir = projectName || `insforge-${frame}`;
-        const cwd = workingDirectory || process.cwd();
         const command = `npx create-insforge-app ${targetDir}  --frame ${frame} --base-url ${API_BASE_URL} --anon-key ${anonKey}`;
 
-        // Execute the npx command in the specified working directory
+        // Execute the npx command (will use MCP server's cwd, which may not be user's workspace)
         const { stdout, stderr } = await execAsync(command, {
           maxBuffer: 10 * 1024 * 1024, // 10MB buffer
-          cwd: cwd,
         });
 
         // Check if command was successful (basic validation)
@@ -553,8 +547,6 @@ export function registerInsforgeTools(server: McpServer, config: ToolsConfig = {
         if (output.toLowerCase().includes('error') && !output.includes('successfully')) {
           throw new Error(`Failed to download template: ${output}`);
         }
-
-        const fullPath = `${cwd}/${targetDir}`;
 
         return {
           content: [
@@ -564,7 +556,7 @@ export function registerInsforgeTools(server: McpServer, config: ToolsConfig = {
                 `React template created successfully`,
                 {
                   projectName: targetDir,
-                  location: fullPath,
+                  location: `./${targetDir}`,
                   baseUrl: API_BASE_URL,
                   nextSteps: [
                     `cd ${targetDir}`,
