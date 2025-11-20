@@ -3,11 +3,19 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { program } from 'commander';
 import { registerInsforgeTools } from '../shared/tools.js';
 
+// Debug: Log environment variables to stderr for troubleshooting
+console.error('=== Environment Debug ===');
+console.error('API_KEY from env:', process.env.API_KEY ? 'Set (length: ' + process.env.API_KEY.length + ')' : 'Not set');
+console.error('API_BASE_URL from env:', process.env.API_BASE_URL || 'Not set');
+console.error('NODE_VERSION:', process.version);
+console.error('=========================');
+
 // Parse command line arguments
 program.option('--api_key <value>', 'API Key');
+program.option('--api_base_url <value>', 'API Base URL');
 program.parse(process.argv);
 const options = program.opts();
-const { api_key } = options;
+const { api_key, api_base_url } = options;
 
 // Create MCP server
 const server = new McpServer({
