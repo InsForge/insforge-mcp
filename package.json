@@ -36,7 +36,7 @@
     "server.json"
   ],
   "dependencies": {
-    "@insforge/shared-schemas": "^1.1.28-nextjs.1",
+    "@insforge/shared-schemas": "^1.1.36",
     "@modelcontextprotocol/sdk": "^1.15.1",
     "@types/express": "^5.0.3",
     "commander": "^14.0.0",

@@ -500,6 +500,7 @@ export function registerInsforgeTools(server: McpServer, config: ToolsConfig = {
     })
   );
 
+  /*
   server.tool(
     'download-template',
     'CRITICAL: MANDATORY FIRST STEP for all new InsForge projects. Download pre-configured starter template to a temporary directory. After download, you MUST copy files to current directory using the provided command.',
@@ -667,6 +668,7 @@ To: Your current project directory
       }
     })
   );
+  */
 
   // --------------------------------------------------
   // STORAGE TOOLS
