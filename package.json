@@ -1,6 +1,6 @@
 {
   "name": "@insforge/mcp",
-  "version": "1.2.5",
+  "version": "1.2.6-memory.0",
   "description": "MCP (Model Context Protocol) server for Insforge backend-as-a-service",
   "mcpName": "io.github.InsForge/insforge-mcp",
   "type": "module",

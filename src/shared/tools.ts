@@ -1289,6 +1289,158 @@ To: Your current project directory
   );
 
   // --------------------------------------------------
+  // MEMORY TOOLS (Conversation Storage with pgvector)
+  // Enabled via MEMORY_ENABLED=true environment variable
+  // --------------------------------------------------
+
+  const memoryEnabled = process.env.MEMORY_ENABLED === 'true';
+
+  if (memoryEnabled) {
+    registerTool(
+      'store-conversation',
+    'Store a conversation with messages for semantic similarity search. Messages are embedded using pgvector for later retrieval.',
+    {
+      apiKey: z
+        .string()
+        .optional()
+        .describe('API key for authentication (optional if provided via --api_key)'),
+      title: z.string().optional().describe('Optional title for the conversation'),
+      metadata: z
+        .record(z.unknown())
+        .optional()
+        .describe('Optional metadata to associate with the conversation'),
+      messages: z
+        .array(
+          z.object({
+            role: z.enum(['user', 'assistant', 'system', 'tool']).describe('Message role'),
+            content: z.string().describe('Message content'),
+            metadata: z.record(z.unknown()).optional().describe('Optional message metadata'),
+          })
+        )
+        .min(1)
+        .describe('Array of messages to store'),
+      embeddingModel: z
+        .string()
+        .optional()
+        .describe('Embedding model to use (uses project default if not specified)'),
+    },
+    withUsageTracking(
+      'store-conversation',
+      async ({ apiKey, title, metadata, messages, embeddingModel }) => {
+        try {
+          const actualApiKey = getApiKey(apiKey);
+
+          const response = await fetch(`${API_BASE_URL}/api/memory/conversations`, {
+            method: 'POST',
+            headers: {
+              'x-api-key': actualApiKey,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ title, metadata, messages, embeddingModel }),
+          });
+
+          const result = await handleApiResponse(response);
+
+          return await addBackgroundContext({
+            content: [
+              {
+                type: 'text',
+                text: formatSuccessMessage('Conversation stored successfully', result),
+              },
+            ],
+          });
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Error storing conversation: ${errMsg}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+    )
+  );
+
+  registerTool(
+    'search-conversations',
+    'Search for conversations by semantic similarity using pgvector. Returns conversations ranked by relevance to the query.',
+    {
+      apiKey: z
+        .string()
+        .optional()
+        .describe('API key for authentication (optional if provided via --api_key)'),
+      query: z.string().describe('Search query to find similar conversations'),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(100)
+        .optional()
+        .default(10)
+        .describe('Maximum number of results to return (default: 10)'),
+      threshold: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .default(0)
+        .describe('Minimum similarity threshold 0-1 (default: 0)'),
+      metadataFilter: z
+        .record(z.unknown())
+        .optional()
+        .describe('Filter conversations by metadata (JSONB containment)'),
+      embeddingModel: z
+        .string()
+        .optional()
+        .describe('Embedding model for the query (uses project default if not specified)'),
+    },
+    withUsageTracking(
+      'search-conversations',
+      async ({ apiKey, query, limit, threshold, metadataFilter, embeddingModel }) => {
+        try {
+          const actualApiKey = getApiKey(apiKey);
+
+          const response = await fetch(`${API_BASE_URL}/api/memory/search`, {
+            method: 'POST',
+            headers: {
+              'x-api-key': actualApiKey,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ query, limit, threshold, metadataFilter, embeddingModel }),
+          });
+
+          const result = await handleApiResponse(response);
+
+          return await addBackgroundContext({
+            content: [
+              {
+                type: 'text',
+                text: formatSuccessMessage('Conversation search completed', result),
+              },
+            ],
+          });
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Error searching conversations: ${errMsg}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+    )
+  );
+  } // End of memoryEnabled check
+
+  // --------------------------------------------------
   // SCHEDULE TOOLS (CRON JOBS) - COMMENTED OUT
   // --------------------------------------------------
 
