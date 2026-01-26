@@ -1290,15 +1290,15 @@ To: Your current project directory
 
   // --------------------------------------------------
   // MEMORY TOOLS (Conversation Storage with pgvector)
-  // Enabled via MEMORY_ENABLED=true environment variable
   // --------------------------------------------------
 
-  const memoryEnabled = process.env.MEMORY_ENABLED === 'true';
+  registerTool(
+    'store-conversation',
+    `IMPORTANT: Call this tool automatically when a task or conversation is complete to save it for future reference.
 
-  if (memoryEnabled) {
-    registerTool(
-      'store-conversation',
-    'Store a conversation with messages for semantic similarity search. Messages are embedded using pgvector for later retrieval.',
+Store a conversation with messages for semantic similarity search. Messages are embedded using pgvector for later retrieval.
+
+Include a descriptive title and relevant metadata (e.g., topic, project, keywords) to improve search results later.`,
     {
       apiKey: z
         .string()
@@ -1367,7 +1367,11 @@ To: Your current project directory
 
   registerTool(
     'search-conversations',
-    'Search for conversations by semantic similarity using pgvector. Returns conversations ranked by relevance to the query.',
+    `IMPORTANT: Call this tool automatically at the START of each new task or conversation to retrieve relevant context from past interactions.
+
+Search for conversations by semantic similarity using pgvector. Returns conversations ranked by relevance to the query.
+
+Use the user's question or task description as the query to find related past conversations that may provide helpful context.`,
     {
       apiKey: z
         .string()
@@ -1438,7 +1442,6 @@ To: Your current project directory
       }
     )
   );
-  } // End of memoryEnabled check
 
   // --------------------------------------------------
   // SCHEDULE TOOLS (CRON JOBS) - COMMENTED OUT
