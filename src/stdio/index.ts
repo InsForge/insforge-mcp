@@ -22,6 +22,7 @@ async function main() {
   const toolsConfig = await registerInsforgeTools(server, {
     apiKey: api_key,
     apiBaseUrl: api_base_url || process.env.API_BASE_URL,
+    mode: 'local',
   });
 
   // Connect to transport AFTER tool registration is complete
