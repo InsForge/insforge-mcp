@@ -1408,12 +1408,11 @@ To: Your current project directory
     // Remote mode: prepare deployment and return instructions for agent to execute locally
     registerTool(
       'create-deployment',
-      'Prepare a deployment by creating a presigned upload URL. Returns shell commands for the agent to execute locally: zip the source directory, upload to cloud storage, and trigger the deployment.',
+      'Prepare a deployment by creating a presigned upload URL. Returns shell commands for the agent to execute locally: zip the source directory and upload to cloud storage. After uploading, call the start-deployment tool to trigger the build.',
       {
         sourceDirectory: z.string().describe('Absolute path to the source directory containing files to deploy (e.g., /Users/name/project). Do not use relative paths like "."'),
-        ...startDeploymentRequestSchema.shape,
       },
-      withUsageTracking('create-deployment', async ({ sourceDirectory, projectSettings, envVars, meta }) => {
+      withUsageTracking('create-deployment', async ({ sourceDirectory }) => {
         try {
           // Create deployment to get presigned upload URL
           const createResponse = await fetch(`${API_BASE_URL}/api/deployments`, {
@@ -1432,17 +1431,9 @@ To: Your current project directory
             .map(([key, value]) => `-F "${key}=${value}"`)
             .join(' \\\n  ');
 
-          // Build start deployment body
-          const startBody: StartDeploymentRequest = {};
-          if (projectSettings) startBody.projectSettings = projectSettings;
-          if (envVars) startBody.envVars = envVars;
-          if (meta) startBody.meta = meta;
-
-          const startBodyJson = JSON.stringify(startBody);
-
           const instructions = `Deployment prepared successfully. Deployment ID: ${deploymentId}
 
-Please execute the following commands locally to complete the deployment:
+Please execute the following commands locally, then call the \`start-deployment\` tool:
 
 ## Step 1: Zip the source directory
 \`\`\`bash
@@ -1457,21 +1448,15 @@ curl -X POST "${uploadUrl}" \
   -F "file=@/tmp/insforge-deploy-${deploymentId}.zip;type=application/zip"
 \`\`\`
 
-## Step 3: Start the deployment
-\`\`\`bash
-curl -X POST "${API_BASE_URL}/api/deployments/${deploymentId}/start" \
-  -H "x-api-key: ${getApiKey()}" \
-  -H "Content-Type: application/json" \
-  -d '${startBodyJson}'
-\`\`\`
-
-## Step 4: Clean up
+## Step 3: Clean up
 \`\`\`bash
 rm /tmp/insforge-deploy-${deploymentId}.zip
 \`\`\`
 
-Run each step in order. If any step fails, do not proceed to the next step.
-You can check deployment status by querying the system.deployments table.`;
+## Step 4: Trigger the build
+Call the \`start-deployment\` tool with deploymentId: "${deploymentId}"
+
+Run each step in order. If any step fails, do not proceed to the next step.`;
 
           return {
             content: [
@@ -1488,6 +1473,55 @@ You can check deployment status by querying the system.deployments table.`;
               {
                 type: 'text',
                 text: `Error preparing deployment: ${errMsg}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      })
+    );
+
+    // Remote mode: start-deployment tool triggers the build via API (keeps API key server-side)
+    registerTool(
+      'start-deployment',
+      'Trigger a deployment build after uploading source code. Use this after executing the upload commands from create-deployment.',
+      {
+        deploymentId: z.string().describe('The deployment ID returned by create-deployment'),
+        ...startDeploymentRequestSchema.shape,
+      },
+      withUsageTracking('start-deployment', async ({ deploymentId, projectSettings, envVars, meta }) => {
+        try {
+          const startBody: StartDeploymentRequest = {};
+          if (projectSettings) startBody.projectSettings = projectSettings;
+          if (envVars) startBody.envVars = envVars;
+          if (meta) startBody.meta = meta;
+
+          const startResponse = await fetch(`${API_BASE_URL}/api/deployments/${deploymentId}/start`, {
+            method: 'POST',
+            headers: {
+              'x-api-key': getApiKey(),
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(startBody),
+          });
+
+          const startResult = await handleApiResponse(startResponse);
+
+          return await addBackgroundContext({
+            content: [
+              {
+                type: 'text',
+                text: formatSuccessMessage('Deployment started', startResult) + '\n\nNote: You can check deployment status by querying the system.deployments table.',
+              },
+            ],
+          });
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Error starting deployment: ${errMsg}`,
               },
             ],
             isError: true,
