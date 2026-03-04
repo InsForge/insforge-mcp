@@ -28,6 +28,9 @@ import FormData from 'form-data';
 
 const execAsync = promisify(exec);
 
+/** Shell-escape a value by wrapping in single quotes and escaping embedded single quotes */
+const shellEsc = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
+
 /**
  * Configuration for the tools
  */
@@ -649,10 +652,10 @@ Supported languages: ${sdkLanguageSchema.options.join(', ')}`,
           const instructions = `Template configuration ready. Please run the following command in your project's parent directory:
 
 \`\`\`bash
-npx create-insforge-app ${targetDir} --frame ${frame} --base-url ${API_BASE_URL} --anon-key ${anonKey}
+npx create-insforge-app ${shellEsc(targetDir)} --frame ${frame} --base-url ${shellEsc(API_BASE_URL)} --anon-key ${shellEsc(anonKey)}
 \`\`\`
 
-After the command completes, \`cd ${targetDir}\` and start developing.`;
+After the command completes, \`cd ${shellEsc(targetDir)}\` and start developing.`;
 
           return {
             content: [
@@ -1426,10 +1429,15 @@ To: Your current project directory
           const createResult: CreateDeploymentResponse = await handleApiResponse(createResponse);
           const { id: deploymentId, uploadUrl, uploadFields } = createResult;
 
+          const esc = shellEsc;
+
           // Build curl upload command with presigned fields
           const curlFields = Object.entries(uploadFields)
-            .map(([key, value]) => `-F "${key}=${value}"`)
+            .map(([key, value]) => `-F ${esc(`${key}=${value}`)}`)
             .join(' \\\n  ');
+
+          const escapedDir = esc(sourceDirectory);
+          const tmpZip = `/tmp/insforge-deploy-${deploymentId}.zip`;
 
           const instructions = `Deployment prepared successfully. Deployment ID: ${deploymentId}
 
@@ -1437,15 +1445,15 @@ Please execute the following commands locally, then call the \`start-deployment\
 
 ## Step 1: Zip the source directory
 \`\`\`bash
-cd "${sourceDirectory}" && zip -r /tmp/insforge-deploy-${deploymentId}.zip . \
+cd ${escapedDir} && zip -r ${tmpZip} . \
   -x "node_modules/*" ".git/*" ".next/*" ".env" ".env.local" "dist/*" "build/*" ".DS_Store" "*.log"
 \`\`\`
 
 ## Step 2: Upload the zip file
 \`\`\`bash
-curl -X POST "${uploadUrl}" \
+curl -X POST ${esc(uploadUrl)} \
   ${curlFields} \
-  -F "file=@/tmp/insforge-deploy-${deploymentId}.zip;type=application/zip"
+  -F 'file=@${tmpZip};type=application/zip'
 \`\`\`
 
 ## Step 3: Clean up
