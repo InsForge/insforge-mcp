@@ -168,10 +168,9 @@ app.get(OAUTH_ENDPOINTS.metadata, (_req: Request, res: Response) => {
 app.get(OAUTH_ENDPOINTS.protectedResource, (_req: Request, res: Response) => {
   const baseUrl = SERVER_CONFIG.publicUrl;
 
-  // Return the origin as the resource, which covers both /mcp and /sse endpoints
-  // This allows OAuth to work for any endpoint on this server
+  // Resource must match the URL the MCP client is accessing (e.g. https://mcp.insforge.dev/mcp)
   res.json({
-    resource: baseUrl,
+    resource: `${baseUrl}/mcp`,
     authorization_servers: [baseUrl],
     scopes_supported: ['mcp:read', 'mcp:write'],
   });
