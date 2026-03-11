@@ -1,17 +1,40 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.InsForge/insforge-mcp",
-  "title": "Insforge",
-  "description": "MCP server for Insforge BaaS - database, auth, storage, edge functions, and container logs",
-  "version": "1.1.5",
+  "title": "InsForge",
+  "description": "MCP server for InsForge backend-as-a-service — database, storage, edge functions, and deployment management",
+  "repository": {
+    "url": "https://github.com/InsForge/insforge-mcp",
+    "source": "github"
+  },
+  "version": "1.2.6",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.insforge.dev/mcp"
+    }
+  ],
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@insforge/mcp",
-      "version": "1.1.5",
+      "version": "1.2.6",
       "transport": {
         "type": "stdio"
-      }
+      },
+      "environmentVariables": [
+        {
+          "name": "API_KEY",
+          "description": "InsForge project API key",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "API_BASE_URL",
+          "description": "InsForge backend URL (e.g. https://your-app.us-east-1.insforge.app)",
+          "isRequired": true
+        }
+      ]
     }
   ]
 }
