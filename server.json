@@ -31,7 +31,7 @@
         },
         {
           "name": "API_BASE_URL",
-          "description": "InsForge backend URL (e.g. https://your-app.us-east-1.insforge.app)",
+          "description": "InsForge backend URL (e.g. https://your-app.us-east.insforge.app)",
           "isRequired": true
         }
       ]
