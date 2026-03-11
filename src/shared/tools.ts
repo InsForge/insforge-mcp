@@ -28,12 +28,16 @@ import FormData from 'form-data';
 
 const execAsync = promisify(exec);
 
+/** Shell-escape a value by wrapping in single quotes and escaping embedded single quotes */
+const shellEsc = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
+
 /**
  * Configuration for the tools
  */
 export interface ToolsConfig {
   apiKey?: string;
   apiBaseUrl?: string;
+  mode?: 'local' | 'remote';
 }
 
 /**
@@ -80,6 +84,14 @@ const TOOL_VERSION_REQUIREMENTS: Record<string, ToolVersionRequirement> = {
   // Example of a deprecated tool (uncomment when needed):
   // 'legacy-tool': { minVersion: '1.0.0', maxVersion: '1.5.0' },
 };
+
+/**
+ * Tools that require local filesystem access and should only be
+ * registered for stdio (local) transport, not HTTP (remote).
+ */
+const LOCAL_ONLY_TOOLS = new Set([
+  'bulk-upsert',         // Requires reading local data file (filePath is required)
+]);
 
 /**
  * Compare semantic versions (e.g., "1.1.0" vs "1.0.0")
@@ -161,6 +173,7 @@ async function fetchBackendVersion(apiBaseUrl: string): Promise<string> {
 export async function registerInsforgeTools(server: McpServer, config: ToolsConfig = {}) {
   const GLOBAL_API_KEY = config.apiKey || process.env.API_KEY || '';
   const API_BASE_URL = config.apiBaseUrl || process.env.API_BASE_URL || 'http://localhost:7130';
+  const isRemote = config.mode === 'remote';
 
   // Initialize usage tracker
   const usageTracker = new UsageTracker(API_BASE_URL, GLOBAL_API_KEY);
@@ -176,6 +189,10 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
   // Using 'any' for args to handle server.tool's multiple overloads
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const registerTool = (toolName: string, ...args: any[]) => {
+    if (isRemote && LOCAL_ONLY_TOOLS.has(toolName)) {
+      console.error(`Skipping tool '${toolName}': requires local filesystem (remote mode)`);
+      return false;
+    }
     if (shouldRegisterTool(toolName, backendVersion)) {
       (server.tool as any)(toolName, ...args);
       toolCount++;
@@ -598,73 +615,139 @@ Supported languages: ${sdkLanguageSchema.options.join(', ')}`,
     })
   );
 
-  registerTool(
-    'download-template',
-    'CRITICAL: MANDATORY FIRST STEP for all new InsForge projects. Download pre-configured starter template to a temporary directory. After download, you MUST copy files to current directory using the provided command.',
-    {
-      frame: z
-        .enum(['react', 'nextjs'])
-        .describe('Framework to use for the template (support React and Next.js)'),
-      projectName: z
-        .string()
-        .optional()
-        .describe('Name for the project directory (optional, defaults to "insforge-react")'),
-    },
-    withUsageTracking('download-template', async ({ frame, projectName }) => {
-      try {
-        // Get the anon key from backend
-        const response = await fetch(`${API_BASE_URL}/api/auth/tokens/anon`, {
-          method: 'POST',
-          headers: {
-            'x-api-key': getApiKey(),
-            'Content-Type': 'application/json',
-          },
-        });
-
-        const result = await handleApiResponse(response);
-        const anonKey = result.accessToken;
-
-        if (!anonKey) {
-          throw new Error('Failed to retrieve anon key from backend');
-        }
-
-        // Create temp directory for download
-        const tempDir = tmpdir();
-        const targetDir = projectName || `insforge-${frame}`;
-        const templatePath = `${tempDir}/${targetDir}`;
-
-        console.error(`[download-template] Target path: ${templatePath}`);
-
-        // Check if template already exists in temp, remove it first
+  if (isRemote) {
+    // Remote mode: fetch anon key and return npx command for agent to execute locally
+    registerTool(
+      'download-template',
+      'CRITICAL: MANDATORY FIRST STEP for all new InsForge projects. Fetches configuration and returns a command for you to run locally to scaffold a starter template.',
+      {
+        frame: z
+          .enum(['react', 'nextjs'])
+          .describe('Framework to use for the template (support React and Next.js)'),
+        projectName: z
+          .string()
+          .optional()
+          .describe('Name for the project directory (optional, defaults to "insforge-{frame}")'),
+      },
+      withUsageTracking('download-template', async ({ frame, projectName }) => {
         try {
-          const stats = await fs.stat(templatePath);
-          if (stats.isDirectory()) {
-            console.error(`[download-template] Removing existing template at ${templatePath}`);
-            await fs.rm(templatePath, { recursive: true, force: true });
+          // Get the anon key from backend
+          const response = await fetch(`${API_BASE_URL}/api/auth/tokens/anon`, {
+            method: 'POST',
+            headers: {
+              'x-api-key': getApiKey(),
+              'Content-Type': 'application/json',
+            },
+          });
+
+          const result = await handleApiResponse(response);
+          const anonKey = result.accessToken;
+
+          if (!anonKey) {
+            throw new Error('Failed to retrieve anon key from backend');
           }
-        } catch {
-          // Directory doesn't exist, which is fine
+
+          const targetDir = projectName || `insforge-${frame}`;
+
+          const instructions = `Template configuration ready. Please run the following command in your project's parent directory:
+
+\`\`\`bash
+npx create-insforge-app ${shellEsc(targetDir)} --frame ${frame} --base-url ${shellEsc(API_BASE_URL)} --anon-key ${shellEsc(anonKey)}
+\`\`\`
+
+After the command completes, \`cd ${shellEsc(targetDir)}\` and start developing.`;
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: instructions,
+              },
+            ],
+          };
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Error preparing template: ${errMsg}`,
+              },
+            ],
+            isError: true,
+          };
         }
+      })
+    );
+  } else {
+    // Local mode: execute npx command directly
+    registerTool(
+      'download-template',
+      'CRITICAL: MANDATORY FIRST STEP for all new InsForge projects. Download pre-configured starter template to a temporary directory. After download, you MUST copy files to current directory using the provided command.',
+      {
+        frame: z
+          .enum(['react', 'nextjs'])
+          .describe('Framework to use for the template (support React and Next.js)'),
+        projectName: z
+          .string()
+          .optional()
+          .describe('Name for the project directory (optional, defaults to "insforge-react")'),
+      },
+      withUsageTracking('download-template', async ({ frame, projectName }) => {
+        try {
+          // Get the anon key from backend
+          const response = await fetch(`${API_BASE_URL}/api/auth/tokens/anon`, {
+            method: 'POST',
+            headers: {
+              'x-api-key': getApiKey(),
+              'Content-Type': 'application/json',
+            },
+          });
 
-        const command = `npx create-insforge-app ${targetDir} --frame ${frame} --base-url ${API_BASE_URL} --anon-key ${anonKey} --skip-install`;
+          const result = await handleApiResponse(response);
+          const anonKey = result.accessToken;
 
-        // Execute the npx command in temp directory
-        const { stdout, stderr } = await execAsync(command, {
-          maxBuffer: 10 * 1024 * 1024, // 10MB buffer
-          cwd: tempDir,
-        });
+          if (!anonKey) {
+            throw new Error('Failed to retrieve anon key from backend');
+          }
 
-        // Check if command was successful (basic validation)
-        const output = stdout || stderr || '';
-        if (output.toLowerCase().includes('error') && !output.includes('successfully')) {
-          throw new Error(`Failed to download template: ${output}`);
-        }
+          // Create temp directory for download
+          const tempDir = tmpdir();
+          const targetDir = projectName || `insforge-${frame}`;
+          const templatePath = `${tempDir}/${targetDir}`;
 
-        return await addBackgroundContext({
-          content: [
-            {
-              type: 'text',
-              text: `✅ React template downloaded successfully
+          console.error(`[download-template] Target path: ${templatePath}`);
+
+          // Check if template already exists in temp, remove it first
+          try {
+            const stats = await fs.stat(templatePath);
+            if (stats.isDirectory()) {
+              console.error(`[download-template] Removing existing template at ${templatePath}`);
+              await fs.rm(templatePath, { recursive: true, force: true });
+            }
+          } catch {
+            // Directory doesn't exist, which is fine
+          }
+
+          const command = `npx create-insforge-app ${targetDir} --frame ${frame} --base-url ${API_BASE_URL} --anon-key ${anonKey} --skip-install`;
+
+          // Execute the npx command in temp directory
+          const { stdout, stderr } = await execAsync(command, {
+            maxBuffer: 10 * 1024 * 1024, // 10MB buffer
+            cwd: tempDir,
+          });
+
+          // Check if command was successful (basic validation)
+          const output = stdout || stderr || '';
+          if (output.toLowerCase().includes('error') && !output.includes('successfully')) {
+            throw new Error(`Failed to download template: ${output}`);
+          }
+
+          return await addBackgroundContext({
+            content: [
+              {
+                type: 'text',
+                text: `✅ React template downloaded successfully
 
 📁 Template Location: ${templatePath}
 
@@ -676,23 +759,24 @@ You MUST copy ALL files (INCLUDING HIDDEN FILES like .env, .gitignore, etc.) fro
 Copy all files from: ${templatePath}
 To: Your current project directory
 `,
-            },
-          ],
-        });
-      } catch (error) {
-        const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Error downloading template: ${errMsg}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    })
-  );
+              },
+            ],
+          });
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Error downloading template: ${errMsg}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      })
+    );
+  }
 
   registerTool(
     'bulk-upsert',
@@ -904,70 +988,130 @@ To: Your current project directory
   // EDGE FUNCTION TOOLS
   // --------------------------------------------------
 
-  registerTool(
-    'create-function',
-    'Create a new edge function that runs in Deno runtime. The code must be written to a file first for version control',
-    {
-      ...uploadFunctionRequestSchema.omit({ code: true }).shape,
-      codeFile: z
-        .string()
-        .describe(
-          'Path to JavaScript file containing the function code. Must export: module.exports = async function(request) { return new Response(...) }'
-        ),
-    },
-    withUsageTracking('create-function', async (args: any) => {
-      try {
-        let code: string;
+  if (isRemote) {
+    // Remote mode: accept inline code string directly
+    registerTool(
+      'create-function',
+      'Create a new edge function that runs in Deno runtime',
+      {
+        ...uploadFunctionRequestSchema.omit({ code: true }).shape,
+        code: z
+          .string()
+          .describe(
+            'The function code as a string. Must export: module.exports = async function(request) { return new Response(...) }'
+          ),
+      },
+      withUsageTracking('create-function', async (args: any) => {
         try {
-          code = await fs.readFile(args.codeFile, 'utf-8');
-        } catch (fileError) {
-          throw new Error(
-            `Failed to read code file '${args.codeFile}': ${fileError instanceof Error ? fileError.message : 'Unknown error'}`
-          );
+          const response = await fetch(`${API_BASE_URL}/api/functions`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': getApiKey(),
+            },
+            body: JSON.stringify({
+              slug: args.slug,
+              name: args.name,
+              code: args.code,
+              description: args.description,
+              status: args.status,
+            }),
+          });
+
+          const result = await handleApiResponse(response);
+
+          return await addBackgroundContext({
+            content: [
+              {
+                type: 'text',
+                text: formatSuccessMessage(
+                  `Edge function '${args.slug}' created successfully`,
+                  result
+                ),
+              },
+            ],
+          });
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Error creating function: ${errMsg}`,
+              },
+            ],
+            isError: true,
+          };
         }
+      })
+    );
+  } else {
+    // Local mode: read code from local file path
+    registerTool(
+      'create-function',
+      'Create a new edge function that runs in Deno runtime. The code must be written to a file first for version control',
+      {
+        ...uploadFunctionRequestSchema.omit({ code: true }).shape,
+        codeFile: z
+          .string()
+          .describe(
+            'Path to JavaScript file containing the function code. Must export: module.exports = async function(request) { return new Response(...) }'
+          ),
+      },
+      withUsageTracking('create-function', async (args: any) => {
+        try {
+          let code: string;
+          try {
+            code = await fs.readFile(args.codeFile, 'utf-8');
+          } catch (fileError) {
+            throw new Error(
+              `Failed to read code file '${args.codeFile}': ${fileError instanceof Error ? fileError.message : 'Unknown error'}`
+            );
+          }
 
-        const response = await fetch(`${API_BASE_URL}/api/functions`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': getApiKey(),
-          },
-          body: JSON.stringify({
-            slug: args.slug,
-            name: args.name,
-            code: code,
-            description: args.description,
-            status: args.status,
-          }),
-        });
-
-        const result = await handleApiResponse(response);
-
-        return await addBackgroundContext({
-          content: [
-            {
-              type: 'text',
-              text: formatSuccessMessage(
-                `Edge function '${args.slug}' created successfully from ${args.codeFile}`,
-                result
-              ),
+          const response = await fetch(`${API_BASE_URL}/api/functions`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': getApiKey(),
             },
-          ],
-        });
-      } catch (error) {
-        const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Error creating function: ${errMsg}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    })
-  );
+            body: JSON.stringify({
+              slug: args.slug,
+              name: args.name,
+              code: code,
+              description: args.description,
+              status: args.status,
+            }),
+          });
+
+          const result = await handleApiResponse(response);
+
+          return await addBackgroundContext({
+            content: [
+              {
+                type: 'text',
+                text: formatSuccessMessage(
+                  `Edge function '${args.slug}' created successfully from ${args.codeFile}`,
+                  result
+                ),
+              },
+            ],
+          });
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Error creating function: ${errMsg}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      })
+    );
+  }
 
   registerTool(
     'get-function',
@@ -1009,81 +1153,151 @@ To: Your current project directory
     })
   );
 
-  registerTool(
-    'update-function',
-    'Update an existing edge function code or metadata',
-    {
-      slug: z.string().describe('The slug identifier of the function to update'),
-      ...updateFunctionRequestSchema.omit({ code: true }).shape,
-      codeFile: z
-        .string()
-        .optional()
-        .describe(
-          'Path to JavaScript file containing the new function code. Must export: module.exports = async function(request) { return new Response(...) }'
-        ),
-    },
-    withUsageTracking('update-function', async (args: any) => {
-      try {
-        const updateData: UpdateFunctionRequest = {};
-        if (args.name) {
-          updateData.name = args.name;
-        }
-
-        if (args.codeFile) {
-          try {
-            updateData.code = await fs.readFile(args.codeFile, 'utf-8');
-          } catch (fileError) {
-            throw new Error(
-              `Failed to read code file '${args.codeFile}': ${fileError instanceof Error ? fileError.message : 'Unknown error'}`
-            );
+  if (isRemote) {
+    // Remote mode: accept inline code string directly
+    registerTool(
+      'update-function',
+      'Update an existing edge function code or metadata',
+      {
+        slug: z.string().describe('The slug identifier of the function to update'),
+        ...updateFunctionRequestSchema.omit({ code: true }).shape,
+        code: z
+          .string()
+          .optional()
+          .describe(
+            'The new function code as a string. Must export: module.exports = async function(request) { return new Response(...) }'
+          ),
+      },
+      withUsageTracking('update-function', async (args: any) => {
+        try {
+          const updateData: UpdateFunctionRequest = {};
+          if (args.name) {
+            updateData.name = args.name;
           }
-        }
+          if (args.code) {
+            updateData.code = args.code;
+          }
+          if (args.description !== undefined) {
+            updateData.description = args.description;
+          }
+          if (args.status) {
+            updateData.status = args.status;
+          }
 
-        if (args.description !== undefined) {
-          updateData.description = args.description;
-        }
-        if (args.status) {
-          updateData.status = args.status;
-        }
-
-        const response = await fetch(`${API_BASE_URL}/api/functions/${args.slug}`, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': getApiKey(),
-          },
-          body: JSON.stringify(updateData),
-        });
-
-        const result = await handleApiResponse(response);
-
-        const fileInfo = args.codeFile ? ` from ${args.codeFile}` : '';
-
-        return await addBackgroundContext({
-          content: [
-            {
-              type: 'text',
-              text: formatSuccessMessage(
-                `Edge function '${args.slug}' updated successfully${fileInfo}`,
-                result
-              ),
+          const response = await fetch(`${API_BASE_URL}/api/functions/${args.slug}`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': getApiKey(),
             },
-          ],
-        });
-      } catch (error) {
-        const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Error updating function: ${errMsg}`,
+            body: JSON.stringify(updateData),
+          });
+
+          const result = await handleApiResponse(response);
+
+          return await addBackgroundContext({
+            content: [
+              {
+                type: 'text',
+                text: formatSuccessMessage(
+                  `Edge function '${args.slug}' updated successfully`,
+                  result
+                ),
+              },
+            ],
+          });
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Error updating function: ${errMsg}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      })
+    );
+  } else {
+    // Local mode: read code from local file path
+    registerTool(
+      'update-function',
+      'Update an existing edge function code or metadata',
+      {
+        slug: z.string().describe('The slug identifier of the function to update'),
+        ...updateFunctionRequestSchema.omit({ code: true }).shape,
+        codeFile: z
+          .string()
+          .optional()
+          .describe(
+            'Path to JavaScript file containing the new function code. Must export: module.exports = async function(request) { return new Response(...) }'
+          ),
+      },
+      withUsageTracking('update-function', async (args: any) => {
+        try {
+          const updateData: UpdateFunctionRequest = {};
+          if (args.name) {
+            updateData.name = args.name;
+          }
+
+          if (args.codeFile) {
+            try {
+              updateData.code = await fs.readFile(args.codeFile, 'utf-8');
+            } catch (fileError) {
+              throw new Error(
+                `Failed to read code file '${args.codeFile}': ${fileError instanceof Error ? fileError.message : 'Unknown error'}`
+              );
+            }
+          }
+
+          if (args.description !== undefined) {
+            updateData.description = args.description;
+          }
+          if (args.status) {
+            updateData.status = args.status;
+          }
+
+          const response = await fetch(`${API_BASE_URL}/api/functions/${args.slug}`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': getApiKey(),
             },
-          ],
-          isError: true,
-        };
-      }
-    })
-  );
+            body: JSON.stringify(updateData),
+          });
+
+          const result = await handleApiResponse(response);
+
+          const fileInfo = args.codeFile ? ` from ${args.codeFile}` : '';
+
+          return await addBackgroundContext({
+            content: [
+              {
+                type: 'text',
+                text: formatSuccessMessage(
+                  `Edge function '${args.slug}' updated successfully${fileInfo}`,
+                  result
+                ),
+              },
+            ],
+          });
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Error updating function: ${errMsg}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      })
+    );
+  }
 
   registerTool(
     'delete-function',
@@ -1193,181 +1407,314 @@ To: Your current project directory
   // DEPLOYMENT TOOLS
   // --------------------------------------------------
 
-  registerTool(
-    'create-deployment',
-    'Deploy source code from a directory. This tool zips files, uploads to cloud storage, and triggers deployment with optional environment variables and project settings.',
-    {
-      sourceDirectory: z.string().describe('Absolute path to the source directory containing files to deploy (e.g., /Users/name/project or C:\\Users\\name\\project). Do not use relative paths like "."'),
-      ...startDeploymentRequestSchema.shape,
-    },
-    withUsageTracking('create-deployment', async ({ sourceDirectory, projectSettings, envVars, meta }) => {
-      try {
-        // Validate that sourceDirectory is an absolute path
-        const isAbsolutePath = sourceDirectory.startsWith('/') || /^[a-zA-Z]:[/\\]/.test(sourceDirectory);
-        if (!isAbsolutePath) {
+  if (isRemote) {
+    // Remote mode: prepare deployment and return instructions for agent to execute locally
+    registerTool(
+      'create-deployment',
+      'Prepare a deployment by creating a presigned upload URL. Returns shell commands for the agent to execute locally: zip the source directory and upload to cloud storage. After uploading, call the start-deployment tool to trigger the build.',
+      {
+        sourceDirectory: z.string().describe('Absolute path to the source directory containing files to deploy (e.g., /Users/name/project). Do not use relative paths like "."'),
+      },
+      withUsageTracking('create-deployment', async ({ sourceDirectory }) => {
+        try {
+          // Create deployment to get presigned upload URL
+          const createResponse = await fetch(`${API_BASE_URL}/api/deployments`, {
+            method: 'POST',
+            headers: {
+              'x-api-key': getApiKey(),
+              'Content-Type': 'application/json',
+            },
+          });
+
+          const createResult: CreateDeploymentResponse = await handleApiResponse(createResponse);
+          const { id: deploymentId, uploadUrl, uploadFields } = createResult;
+
+          const esc = shellEsc;
+
+          // Build curl upload command with presigned fields
+          const curlFields = Object.entries(uploadFields)
+            .map(([key, value]) => `-F ${esc(`${key}=${value}`)}`)
+            .join(' \\\n  ');
+
+          const escapedDir = esc(sourceDirectory);
+          const tmpZip = `/tmp/insforge-deploy-${deploymentId}.zip`;
+
+          const instructions = `Deployment prepared successfully. Deployment ID: ${deploymentId}
+
+Please execute the following commands locally, then call the \`start-deployment\` tool:
+
+## Step 1: Zip the source directory
+\`\`\`bash
+cd ${escapedDir} && zip -r ${tmpZip} . \
+  -x "node_modules/*" ".git/*" ".next/*" ".env" ".env.local" "dist/*" "build/*" ".DS_Store" "*.log"
+\`\`\`
+
+## Step 2: Upload the zip file
+\`\`\`bash
+curl -X POST ${esc(uploadUrl)} \
+  ${curlFields} \
+  -F 'file=@${tmpZip};type=application/zip'
+\`\`\`
+
+## Step 3: Clean up
+\`\`\`bash
+rm /tmp/insforge-deploy-${deploymentId}.zip
+\`\`\`
+
+## Step 4: Trigger the build
+Call the \`start-deployment\` tool with deploymentId: "${deploymentId}"
+
+Run each step in order. If any step fails, do not proceed to the next step.`;
+
           return {
             content: [
               {
-                type: 'text' as const,
-                text: `Error: sourceDirectory must be an absolute path, not a relative path like "${sourceDirectory}". Please provide the full path to the source directory (e.g., /Users/name/project on macOS/Linux or C:\\Users\\name\\project on Windows).`,
+                type: 'text',
+                text: instructions,
+              },
+            ],
+          };
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Error preparing deployment: ${errMsg}`,
               },
             ],
             isError: true,
           };
         }
+      })
+    );
 
-        // Validate that sourceDirectory exists and is a directory
+    // Remote mode: start-deployment tool triggers the build via API (keeps API key server-side)
+    registerTool(
+      'start-deployment',
+      'Trigger a deployment build after uploading source code. Use this after executing the upload commands from create-deployment.',
+      {
+        deploymentId: z.string().describe('The deployment ID returned by create-deployment'),
+        ...startDeploymentRequestSchema.shape,
+      },
+      withUsageTracking('start-deployment', async ({ deploymentId, projectSettings, envVars, meta }) => {
         try {
-          const stats = await fs.stat(sourceDirectory);
-          if (!stats.isDirectory()) {
+          const startBody: StartDeploymentRequest = {};
+          if (projectSettings) startBody.projectSettings = projectSettings;
+          if (envVars) startBody.envVars = envVars;
+          if (meta) startBody.meta = meta;
+
+          const startResponse = await fetch(`${API_BASE_URL}/api/deployments/${deploymentId}/start`, {
+            method: 'POST',
+            headers: {
+              'x-api-key': getApiKey(),
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(startBody),
+          });
+
+          const startResult = await handleApiResponse(startResponse);
+
+          return await addBackgroundContext({
+            content: [
+              {
+                type: 'text',
+                text: formatSuccessMessage('Deployment started', startResult) + '\n\nNote: You can check deployment status by querying the system.deployments table.',
+              },
+            ],
+          });
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Error starting deployment: ${errMsg}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      })
+    );
+  } else {
+    // Local mode: zip, upload, and trigger deployment directly
+    registerTool(
+      'create-deployment',
+      'Deploy source code from a directory. This tool zips files, uploads to cloud storage, and triggers deployment with optional environment variables and project settings.',
+      {
+        sourceDirectory: z.string().describe('Absolute path to the source directory containing files to deploy (e.g., /Users/name/project or C:\\Users\\name\\project). Do not use relative paths like "."'),
+        ...startDeploymentRequestSchema.shape,
+      },
+      withUsageTracking('create-deployment', async ({ sourceDirectory, projectSettings, envVars, meta }) => {
+        try {
+          // Validate that sourceDirectory is an absolute path
+          const isAbsolutePath = sourceDirectory.startsWith('/') || /^[a-zA-Z]:[/\\]/.test(sourceDirectory);
+          if (!isAbsolutePath) {
             return {
               content: [
                 {
                   type: 'text' as const,
-                  text: `Error: "${sourceDirectory}" is not a directory. Please provide a path to a directory containing the source code.`,
+                  text: `Error: sourceDirectory must be an absolute path, not a relative path like "${sourceDirectory}". Please provide the full path to the source directory (e.g., /Users/name/project on macOS/Linux or C:\\Users\\name\\project on Windows).`,
                 },
               ],
               isError: true,
             };
           }
-        } catch (statError) {
+
+          // Validate that sourceDirectory exists and is a directory
+          try {
+            const stats = await fs.stat(sourceDirectory);
+            if (!stats.isDirectory()) {
+              return {
+                content: [
+                  {
+                    type: 'text' as const,
+                    text: `Error: "${sourceDirectory}" is not a directory. Please provide a path to a directory containing the source code.`,
+                  },
+                ],
+                isError: true,
+              };
+            }
+          } catch (statError) {
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: `Error: Directory "${sourceDirectory}" does not exist or is not accessible. Please verify the path is correct.`,
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          // Use the provided absolute path directly
+          const resolvedSourceDir = sourceDirectory;
+
+          // Step 1: Create deployment to get presigned upload URL
+          const createResponse = await fetch(`${API_BASE_URL}/api/deployments`, {
+            method: 'POST',
+            headers: {
+              'x-api-key': getApiKey(),
+              'Content-Type': 'application/json',
+            },
+          });
+
+          const createResult: CreateDeploymentResponse = await handleApiResponse(createResponse);
+          const { id: deploymentId, uploadUrl, uploadFields } = createResult;
+
+          // Step 2: Create zip in memory using archiver (cross-platform)
+          // Use archive.directory() instead of glob() for better Windows compatibility
+          const zipBuffer = await new Promise<Buffer>((resolve, reject) => {
+            const archive = archiver('zip', { zlib: { level: 9 } });
+            const chunks: Buffer[] = [];
+
+            archive.on('data', (chunk: Buffer) => chunks.push(chunk));
+            archive.on('end', () => resolve(Buffer.concat(chunks)));
+            archive.on('error', (err: Error) => reject(err));
+
+            // Patterns to exclude (normalized for cross-platform)
+            const excludePatterns = [
+              'node_modules',
+              '.git',
+              '.next',
+              '.env',
+              '.env.local',
+              'dist',
+              'build',
+              '.DS_Store',
+            ];
+
+            // Add directory with filter function for cross-platform compatibility
+            archive.directory(resolvedSourceDir, false, (entry) => {
+              // Normalize path separators for cross-platform matching
+              const normalizedName = entry.name.replace(/\\/g, '/');
+
+              // Check if file should be excluded
+              for (const pattern of excludePatterns) {
+                if (normalizedName.startsWith(pattern + '/') ||
+                    normalizedName === pattern ||
+                    normalizedName.endsWith('/' + pattern) ||
+                    normalizedName.includes('/' + pattern + '/')) {
+                  return false;
+                }
+              }
+
+              // Skip log files
+              if (normalizedName.endsWith('.log')) {
+                return false;
+              }
+
+              return entry; // Include this entry
+            });
+
+            archive.finalize();
+          });
+
+          // Step 3: Upload zip to presigned URL
+          const uploadFormData = new FormData();
+
+          // Add all presigned fields first
+          for (const [key, value] of Object.entries(uploadFields)) {
+            uploadFormData.append(key, value);
+          }
+          // Add the file last
+          uploadFormData.append('file', zipBuffer, {
+            filename: 'deployment.zip',
+            contentType: 'application/zip',
+          });
+
+          const uploadResponse = await fetch(uploadUrl, {
+            method: 'POST',
+            body: uploadFormData,
+            headers: uploadFormData.getHeaders(),
+          });
+
+          if (!uploadResponse.ok) {
+            const uploadError = await uploadResponse.text();
+            throw new Error(`Failed to upload zip file: ${uploadError}`);
+          }
+
+          // Step 4: Start the deployment
+          const startBody: StartDeploymentRequest = {};
+          if (projectSettings) startBody.projectSettings = projectSettings;
+          if (envVars) startBody.envVars = envVars;
+          if (meta) startBody.meta = meta;
+
+          const startResponse = await fetch(`${API_BASE_URL}/api/deployments/${deploymentId}/start`, {
+            method: 'POST',
+            headers: {
+              'x-api-key': getApiKey(),
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(startBody),
+          });
+
+          const startResult = await handleApiResponse(startResponse);
+
+          return await addBackgroundContext({
+            content: [
+              {
+                type: 'text',
+                text: formatSuccessMessage('Deployment started', startResult) + '\n\nNote: You can check deployment status by querying the system.deployments table.',
+              },
+            ],
+          });
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
           return {
             content: [
               {
-                type: 'text' as const,
-                text: `Error: Directory "${sourceDirectory}" does not exist or is not accessible. Please verify the path is correct.`,
+                type: 'text',
+                text: `Error creating deployment: ${errMsg}`,
               },
             ],
             isError: true,
           };
         }
-
-        // Use the provided absolute path directly
-        const resolvedSourceDir = sourceDirectory;
-
-        // Step 1: Create deployment to get presigned upload URL
-        const createResponse = await fetch(`${API_BASE_URL}/api/deployments`, {
-          method: 'POST',
-          headers: {
-            'x-api-key': getApiKey(),
-            'Content-Type': 'application/json',
-          },
-        });
-
-        const createResult: CreateDeploymentResponse = await handleApiResponse(createResponse);
-        const { id: deploymentId, uploadUrl, uploadFields } = createResult;
-
-        // Step 2: Create zip in memory using archiver (cross-platform)
-        // Use archive.directory() instead of glob() for better Windows compatibility
-        const zipBuffer = await new Promise<Buffer>((resolve, reject) => {
-          const archive = archiver('zip', { zlib: { level: 9 } });
-          const chunks: Buffer[] = [];
-
-          archive.on('data', (chunk: Buffer) => chunks.push(chunk));
-          archive.on('end', () => resolve(Buffer.concat(chunks)));
-          archive.on('error', (err: Error) => reject(err));
-
-          // Patterns to exclude (normalized for cross-platform)
-          const excludePatterns = [
-            'node_modules',
-            '.git',
-            '.next',
-            '.env',
-            '.env.local',
-            'dist',
-            'build',
-            '.DS_Store',
-          ];
-
-          // Add directory with filter function for cross-platform compatibility
-          archive.directory(resolvedSourceDir, false, (entry) => {
-            // Normalize path separators for cross-platform matching
-            const normalizedName = entry.name.replace(/\\/g, '/');
-
-            // Check if file should be excluded
-            for (const pattern of excludePatterns) {
-              if (normalizedName.startsWith(pattern + '/') ||
-                  normalizedName === pattern ||
-                  normalizedName.endsWith('/' + pattern) ||
-                  normalizedName.includes('/' + pattern + '/')) {
-                return false;
-              }
-            }
-
-            // Skip log files
-            if (normalizedName.endsWith('.log')) {
-              return false;
-            }
-
-            return entry; // Include this entry
-          });
-
-          archive.finalize();
-        });
-
-        // Step 3: Upload zip to presigned URL
-        const uploadFormData = new FormData();
-
-        // Add all presigned fields first
-        for (const [key, value] of Object.entries(uploadFields)) {
-          uploadFormData.append(key, value);
-        }
-        // Add the file last
-        uploadFormData.append('file', zipBuffer, {
-          filename: 'deployment.zip',
-          contentType: 'application/zip',
-        });
-
-        const uploadResponse = await fetch(uploadUrl, {
-          method: 'POST',
-          body: uploadFormData,
-          headers: uploadFormData.getHeaders(),
-        });
-
-        if (!uploadResponse.ok) {
-          const uploadError = await uploadResponse.text();
-          throw new Error(`Failed to upload zip file: ${uploadError}`);
-        }
-
-        // Step 4: Start the deployment
-        const startBody: StartDeploymentRequest = {};
-        if (projectSettings) startBody.projectSettings = projectSettings;
-        if (envVars) startBody.envVars = envVars;
-        if (meta) startBody.meta = meta;
-
-        const startResponse = await fetch(`${API_BASE_URL}/api/deployments/${deploymentId}/start`, {
-          method: 'POST',
-          headers: {
-            'x-api-key': getApiKey(),
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(startBody),
-        });
-
-        const startResult = await handleApiResponse(startResponse);
-
-        return await addBackgroundContext({
-          content: [
-            {
-              type: 'text',
-              text: formatSuccessMessage('Deployment started', startResult) + '\n\nNote: You can check deployment status by querying the system.deployments table.',
-            },
-          ],
-        });
-      } catch (error) {
-        const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Error creating deployment: ${errMsg}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    })
-  );
+      })
+    );
+  }
 
   // --------------------------------------------------
   // SCHEDULE TOOLS (CRON JOBS) - COMMENTED OUT

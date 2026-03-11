@@ -78,6 +78,7 @@ export class SessionManager {
     const toolsConfig = await registerInsforgeTools(server, {
       apiKey: sessionData.apiKey,
       apiBaseUrl: sessionData.apiBaseUrl,
+      mode: 'remote',
     });
 
     // Connect server to transport BEFORE persisting to Redis
@@ -194,6 +195,7 @@ export class SessionManager {
     await registerInsforgeTools(server, {
       apiKey: sessionData.apiKey,
       apiBaseUrl: sessionData.apiBaseUrl,
+      mode: 'remote',
     });
 
     await server.connect(transport);
@@ -231,6 +233,7 @@ export class SessionManager {
     const toolsConfig = await registerInsforgeTools(server, {
       apiKey: sessionData.apiKey,
       apiBaseUrl: sessionData.apiBaseUrl,
+      mode: 'remote',
     });
 
     // Connect server to SSE transport BEFORE persisting to Redis
