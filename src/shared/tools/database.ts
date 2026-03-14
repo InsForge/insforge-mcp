@@ -4,7 +4,7 @@ import { promises as fs } from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { join, basename } from 'path';
 import FormData from 'form-data';
 import { handleApiResponse, formatSuccessMessage } from '../response-handler.js';
 import {
@@ -36,7 +36,7 @@ export function registerDatabaseTools(ctx: RegisterContext): void {
     withUsageTracking('get-table-schema', async ({ apiKey, tableName }) => {
       try {
         const actualApiKey = getApiKey(apiKey);
-        const response = await fetch(`${API_BASE_URL}/api/metadata/${tableName}`, {
+        const response = await fetch(`${API_BASE_URL}/api/metadata/${encodeURIComponent(tableName)}`, {
           method: 'GET',
           headers: { 'x-api-key': actualApiKey },
         });
@@ -144,7 +144,14 @@ export function registerDatabaseTools(ctx: RegisterContext): void {
             throw new Error('Failed to retrieve anon key from backend');
           }
 
-          const targetDir = projectName || `insforge-${frame}`;
+          const rawDir = projectName || `insforge-${frame}`;
+
+          // Reject path traversal and shell-unsafe names (mirrors local mode validation)
+          if (!rawDir || rawDir === '.' || rawDir === '..' || /[/\\]/.test(rawDir) || !/^[\w.-]+$/.test(rawDir)) {
+            throw new Error('projectName must be a single directory name using only letters, numbers, hyphens, underscores, and dots');
+          }
+
+          const targetDir = rawDir;
           const instructions = `Template configuration ready. Please run the following command in your project's parent directory:
 
 \`\`\`bash
@@ -256,7 +263,7 @@ To: Your current project directory
         const actualApiKey = getApiKey(apiKey);
 
         const fileBuffer = await fs.readFile(filePath);
-        const fileName = filePath.split('/').pop() || 'data.csv';
+        const fileName = basename(filePath) || 'data.csv';
 
         const formData = new FormData();
         formData.append('file', fileBuffer, fileName);

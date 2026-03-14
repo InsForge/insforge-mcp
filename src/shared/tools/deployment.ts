@@ -78,6 +78,17 @@ export function registerDeploymentTools(ctx: RegisterContext): void {
       },
       withUsageTracking('create-deployment', async ({ sourceDirectory }) => {
         try {
+          const isAbsolutePath = sourceDirectory.startsWith('/') || /^[a-zA-Z]:[/\\]/.test(sourceDirectory);
+          if (!isAbsolutePath) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: `Error: sourceDirectory must be an absolute path, not a relative path like "${sourceDirectory}". Please provide the full path to the source directory (e.g., /Users/name/project on macOS/Linux or C:\\Users\\name\\project on Windows).`,
+              }],
+              isError: true,
+            };
+          }
+
           const createResponse = await fetch(`${API_BASE_URL}/api/deployments`, {
             method: 'POST',
             headers: {
@@ -152,7 +163,7 @@ Run each step in order. If any step fails, do not proceed to the next step.`;
           if (envVars) startBody.envVars = envVars;
           if (meta) startBody.meta = meta;
 
-          const startResponse = await fetch(`${API_BASE_URL}/api/deployments/${deploymentId}/start`, {
+          const startResponse = await fetch(`${API_BASE_URL}/api/deployments/${encodeURIComponent(deploymentId)}/start`, {
             method: 'POST',
             headers: {
               'x-api-key': getApiKey(),
@@ -301,7 +312,7 @@ Run each step in order. If any step fails, do not proceed to the next step.`;
           if (envVars) startBody.envVars = envVars;
           if (meta) startBody.meta = meta;
 
-          const startResponse = await fetch(`${API_BASE_URL}/api/deployments/${deploymentId}/start`, {
+          const startResponse = await fetch(`${API_BASE_URL}/api/deployments/${encodeURIComponent(deploymentId)}/start`, {
             method: 'POST',
             headers: {
               'x-api-key': getApiKey(),

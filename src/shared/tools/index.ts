@@ -130,6 +130,9 @@ async function fetchBackendVersion(apiBaseUrl: string): Promise<string> {
     }
 
     const health = await response.json() as HealthCheckResponse;
+    if (!health.version || typeof health.version !== 'string') {
+      throw new Error('Health check returned invalid version field');
+    }
     return health.version;
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
@@ -188,7 +191,9 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
 
   async function trackToolUsage(toolName: string, success = true): Promise<void> {
     if (GLOBAL_API_KEY) {
-      await usageTracker.trackUsage(toolName, success);
+      await usageTracker.trackUsage(toolName, success).catch((err: unknown) => {
+        console.error(`Failed to track usage for '${toolName}':`, err);
+      });
     }
   }
 

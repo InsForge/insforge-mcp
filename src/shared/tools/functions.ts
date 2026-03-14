@@ -6,6 +6,7 @@ import {
   UpdateFunctionRequest,
   updateFunctionRequestSchema,
   uploadFunctionRequestSchema,
+  functionSchema,
 } from '@insforge/shared-schemas';
 import type { RegisterContext } from './types.js';
 
@@ -118,7 +119,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
     'Get details of a specific edge function including its code',
     {
       apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
-      slug: z.string().describe('The slug identifier of the function'),
+      slug: functionSchema.shape.slug.describe('The slug identifier of the function'),
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     withUsageTracking('get-function', async (args: any) => {
@@ -149,7 +150,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
       'Update an existing edge function code or metadata',
       {
         apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
-        slug: z.string().describe('The slug identifier of the function to update'),
+        slug: functionSchema.shape.slug.describe('The slug identifier of the function to update'),
         ...updateFunctionRequestSchema.omit({ code: true }).shape,
         code: z.string().optional().describe(
           'The new function code as a string. Must export: module.exports = async function(request) { return new Response(...) }'
@@ -193,7 +194,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
       'Update an existing edge function code or metadata',
       {
         apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
-        slug: z.string().describe('The slug identifier of the function to update'),
+        slug: functionSchema.shape.slug.describe('The slug identifier of the function to update'),
         ...updateFunctionRequestSchema.omit({ code: true }).shape,
         codeFile: z.string().optional().describe(
           'Path to JavaScript file containing the new function code. Must export: module.exports = async function(request) { return new Response(...) }'
@@ -249,7 +250,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
     'Delete an edge function permanently',
     {
       apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
-      slug: z.string().describe('The slug identifier of the function to delete'),
+      slug: functionSchema.shape.slug.describe('The slug identifier of the function to delete'),
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     withUsageTracking('delete-function', async (args: any) => {
