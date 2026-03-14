@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { program } from 'commander';
-import { registerInsforgeTools } from '../shared/tools.js';
+import { registerInsforgeTools } from '../shared/tools/index.js';
 
 // Parse command line arguments
 program.option('--api_key <value>', 'API Key');
