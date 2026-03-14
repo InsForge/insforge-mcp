@@ -123,7 +123,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     withUsageTracking('get-function', async (args: any) => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/functions/${args.slug}`, {
+        const response = await fetch(`${API_BASE_URL}/api/functions/${encodeURIComponent(args.slug)}`, {
           method: 'GET',
           headers: { 'x-api-key': getApiKey(args.apiKey) },
         });
@@ -164,7 +164,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
           if (args.description !== undefined) updateData.description = args.description;
           if (args.status) updateData.status = args.status;
 
-          const response = await fetch(`${API_BASE_URL}/api/functions/${args.slug}`, {
+          const response = await fetch(`${API_BASE_URL}/api/functions/${encodeURIComponent(args.slug)}`, {
             method: 'PUT',
             headers: {
               'Content-Type': 'application/json',
@@ -218,7 +218,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
           if (args.description !== undefined) updateData.description = args.description;
           if (args.status) updateData.status = args.status;
 
-          const response = await fetch(`${API_BASE_URL}/api/functions/${args.slug}`, {
+          const response = await fetch(`${API_BASE_URL}/api/functions/${encodeURIComponent(args.slug)}`, {
             method: 'PUT',
             headers: {
               'Content-Type': 'application/json',
@@ -254,7 +254,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     withUsageTracking('delete-function', async (args: any) => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/functions/${args.slug}`, {
+        const response = await fetch(`${API_BASE_URL}/api/functions/${encodeURIComponent(args.slug)}`, {
           method: 'DELETE',
           headers: { 'x-api-key': getApiKey(args.apiKey) },
         });

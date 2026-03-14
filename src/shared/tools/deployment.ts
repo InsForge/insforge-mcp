@@ -237,61 +237,63 @@ Run each step in order. If any step fails, do not proceed to the next step.`;
           // (S3 presigned POSTs require Content-Length; streaming without it fails)
           const tmpZipPath = join(tmpdir(), `insforge-deploy-${deploymentId}.zip`);
 
-          await new Promise<void>((resolve, reject) => {
-            const archive = archiver('zip', { zlib: { level: 9 } });
-            const output = createWriteStream(tmpZipPath);
+          try {
+            await new Promise<void>((resolve, reject) => {
+              const archive = archiver('zip', { zlib: { level: 9 } });
+              const output = createWriteStream(tmpZipPath);
 
-            output.on('close', resolve);
-            archive.on('error', reject);
+              output.on('close', resolve);
+              output.on('error', reject);
+              archive.on('error', reject);
 
-            const excludePatterns = ['node_modules', '.git', '.next', '.env', '.env.local', 'dist', 'build', '.DS_Store'];
+              const excludePatterns = ['node_modules', '.git', '.next', '.env', '.env.local', 'dist', 'build', '.DS_Store'];
 
-            archive.directory(resolvedSourceDir, false, (entry) => {
-              const normalizedName = entry.name.replace(/\\/g, '/');
+              archive.directory(resolvedSourceDir, false, (entry) => {
+                const normalizedName = entry.name.replace(/\\/g, '/');
 
-              for (const pattern of excludePatterns) {
-                if (
-                  normalizedName.startsWith(pattern + '/') ||
-                  normalizedName === pattern ||
-                  normalizedName.endsWith('/' + pattern) ||
-                  normalizedName.includes('/' + pattern + '/')
-                ) {
-                  return false;
+                for (const pattern of excludePatterns) {
+                  if (
+                    normalizedName.startsWith(pattern + '/') ||
+                    normalizedName === pattern ||
+                    normalizedName.endsWith('/' + pattern) ||
+                    normalizedName.includes('/' + pattern + '/')
+                  ) {
+                    return false;
+                  }
                 }
-              }
 
-              if (normalizedName.endsWith('.log')) return false;
-              return entry;
+                if (normalizedName.endsWith('.log')) return false;
+                return entry;
+              });
+
+              archive.pipe(output);
+              archive.finalize();
             });
 
-            archive.pipe(output);
-            archive.finalize();
-          });
+            const { size: zipSize } = await fs.stat(tmpZipPath);
 
-          const { size: zipSize } = await fs.stat(tmpZipPath);
+            const uploadFormData = new FormData();
+            for (const [key, value] of Object.entries(uploadFields)) {
+              uploadFormData.append(key, value);
+            }
+            uploadFormData.append('file', createReadStream(tmpZipPath), {
+              filename: 'deployment.zip',
+              contentType: 'application/zip',
+              knownLength: zipSize,
+            });
 
-          const uploadFormData = new FormData();
-          for (const [key, value] of Object.entries(uploadFields)) {
-            uploadFormData.append(key, value);
-          }
-          uploadFormData.append('file', createReadStream(tmpZipPath), {
-            filename: 'deployment.zip',
-            contentType: 'application/zip',
-            knownLength: zipSize,
-          });
+            const uploadResponse = await fetch(uploadUrl, {
+              method: 'POST',
+              body: uploadFormData,
+              headers: uploadFormData.getHeaders(),
+            });
 
-          const uploadResponse = await fetch(uploadUrl, {
-            method: 'POST',
-            body: uploadFormData,
-            headers: uploadFormData.getHeaders(),
-          });
-
-          // Clean up temp zip regardless of upload outcome
-          await fs.rm(tmpZipPath, { force: true });
-
-          if (!uploadResponse.ok) {
-            const uploadError = await uploadResponse.text();
-            throw new Error(`Failed to upload zip file: ${uploadError}`);
+            if (!uploadResponse.ok) {
+              const uploadError = await uploadResponse.text();
+              throw new Error(`Failed to upload zip file: ${uploadError}`);
+            }
+          } finally {
+            await fs.rm(tmpZipPath, { force: true }).catch(() => undefined);
           }
 
           const startBody: StartDeploymentRequest = {};

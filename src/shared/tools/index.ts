@@ -199,7 +199,13 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
     return async (...args: T): Promise<R> => {
       try {
         const result = await handler(...args);
-        await trackToolUsage(toolName, true);
+        // Treat structured error responses (isError: true) as failures
+        const isStructuredError =
+          result !== null &&
+          typeof result === 'object' &&
+          'isError' in (result as Record<string, unknown>) &&
+          (result as Record<string, unknown>)['isError'] === true;
+        await trackToolUsage(toolName, !isStructuredError);
         return result;
       } catch (error) {
         await trackToolUsage(toolName, false);
@@ -208,11 +214,12 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
     };
   }
 
-  const getApiKey = (_toolApiKey?: string): string => {
-    if (!GLOBAL_API_KEY) {
+  const getApiKey = (toolApiKey?: string): string => {
+    const apiKey = toolApiKey?.trim() || GLOBAL_API_KEY;
+    if (!apiKey) {
       throw new Error('API key is required. Pass --api_key when starting the MCP server.');
     }
-    return GLOBAL_API_KEY;
+    return apiKey;
   };
 
   const addBackgroundContext = async <T extends { content: Array<{ type: 'text'; text: string }> }>(

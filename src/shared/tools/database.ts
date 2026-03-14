@@ -199,31 +199,19 @@ After the command completes, \`cd ${shellEsc(targetDir)}\` and start developing.
           }
 
           const targetDir = rawDir;
-          const tempDir = tmpdir();
-          const templatePath = join(tempDir, targetDir);
+
+          // Create a unique workspace to avoid collisions across concurrent runs
+          const workspaceBase = await fs.mkdtemp(join(tmpdir(), 'insforge-template-'));
+          const templatePath = join(workspaceBase, targetDir);
 
           console.error(`[download-template] Target path: ${templatePath}`);
 
-          try {
-            const stats = await fs.stat(templatePath);
-            if (stats.isDirectory()) {
-              console.error(`[download-template] Removing existing template at ${templatePath}`);
-              await fs.rm(templatePath, { recursive: true, force: true });
-            }
-          } catch {
-            // Directory doesn't exist, which is fine
-          }
-
-          const { stdout, stderr } = await execFileAsync(
+          // execFileAsync rejects on non-zero exit — no fragile stdout/stderr inspection needed
+          await execFileAsync(
             'npx',
             ['create-insforge-app', targetDir, '--frame', frame, '--base-url', API_BASE_URL, '--anon-key', anonKey, '--skip-install'],
-            { maxBuffer: 10 * 1024 * 1024, cwd: tempDir }
+            { maxBuffer: 10 * 1024 * 1024, cwd: workspaceBase }
           );
-
-          const output = stdout || stderr || '';
-          if (output.toLowerCase().includes('error') && !output.includes('successfully')) {
-            throw new Error(`Failed to download template: ${output}`);
-          }
 
           const frameName = frame === 'nextjs' ? 'Next.js' : 'React';
 

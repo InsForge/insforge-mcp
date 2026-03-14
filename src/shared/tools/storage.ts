@@ -76,12 +76,13 @@ export function registerStorageTools(ctx: RegisterContext): void {
     'Deletes a storage bucket',
     {
       apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
-      bucketName: z.string().describe('Name of the bucket to delete'),
+      // Reuse the same bucket name validation as create-bucket
+      bucketName: createBucketRequestSchema.shape.bucketName,
     },
     withUsageTracking('delete-bucket', async ({ apiKey, bucketName }) => {
       try {
         const actualApiKey = getApiKey(apiKey);
-        const response = await fetch(`${API_BASE_URL}/api/storage/buckets/${bucketName}`, {
+        const response = await fetch(`${API_BASE_URL}/api/storage/buckets/${encodeURIComponent(bucketName)}`, {
           method: 'DELETE',
           headers: { 'x-api-key': actualApiKey },
         });
