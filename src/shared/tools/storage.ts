@@ -47,12 +47,14 @@ export function registerStorageTools(ctx: RegisterContext): void {
   registerTool(
     'list-buckets',
     'Lists all storage buckets',
-    {},
-    withUsageTracking('list-buckets', async () => {
+    {
+      apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
+    },
+    withUsageTracking('list-buckets', async ({ apiKey }) => {
       try {
         const response = await fetch(`${API_BASE_URL}/api/storage/buckets`, {
           method: 'GET',
-          headers: { 'x-api-key': getApiKey() },
+          headers: { 'x-api-key': getApiKey(apiKey) },
         });
 
         const result = await handleApiResponse(response);

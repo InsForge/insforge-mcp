@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import fetch from 'node-fetch';
 import { promises as fs } from 'fs';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { tmpdir } from 'os';
+import { join } from 'path';
 import FormData from 'form-data';
 import { handleApiResponse, formatSuccessMessage } from '../response-handler.js';
 import {
@@ -13,7 +14,7 @@ import {
 } from '@insforge/shared-schemas';
 import type { RegisterContext } from './types.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 /** Shell-escape a value by wrapping in single quotes and escaping embedded single quotes */
 const shellEsc = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
@@ -171,7 +172,7 @@ After the command completes, \`cd ${shellEsc(targetDir)}\` and start developing.
       'CRITICAL: MANDATORY FIRST STEP for all new InsForge projects. Download pre-configured starter template to a temporary directory. After download, you MUST copy files to current directory using the provided command.',
       {
         frame: z.enum(['react', 'nextjs']).describe('Framework to use for the template (support React and Next.js)'),
-        projectName: z.string().optional().describe('Name for the project directory (optional, defaults to "insforge-react")'),
+        projectName: z.string().optional().describe('Name for the project directory (optional, defaults to "insforge-{frame}")'),
       },
       withUsageTracking('download-template', async ({ frame, projectName }) => {
         try {
@@ -190,9 +191,16 @@ After the command completes, \`cd ${shellEsc(targetDir)}\` and start developing.
             throw new Error('Failed to retrieve anon key from backend');
           }
 
+          const rawDir = projectName || `insforge-${frame}`;
+
+          // Reject path traversal and shell-unsafe names
+          if (!rawDir || rawDir === '.' || rawDir === '..' || /[/\\]/.test(rawDir) || !/^[\w.-]+$/.test(rawDir)) {
+            throw new Error('projectName must be a single directory name using only letters, numbers, hyphens, underscores, and dots');
+          }
+
+          const targetDir = rawDir;
           const tempDir = tmpdir();
-          const targetDir = projectName || `insforge-${frame}`;
-          const templatePath = `${tempDir}/${targetDir}`;
+          const templatePath = join(tempDir, targetDir);
 
           console.error(`[download-template] Target path: ${templatePath}`);
 
@@ -206,22 +214,23 @@ After the command completes, \`cd ${shellEsc(targetDir)}\` and start developing.
             // Directory doesn't exist, which is fine
           }
 
-          const command = `npx create-insforge-app ${targetDir} --frame ${frame} --base-url ${API_BASE_URL} --anon-key ${anonKey} --skip-install`;
-
-          const { stdout, stderr } = await execAsync(command, {
-            maxBuffer: 10 * 1024 * 1024,
-            cwd: tempDir,
-          });
+          const { stdout, stderr } = await execFileAsync(
+            'npx',
+            ['create-insforge-app', targetDir, '--frame', frame, '--base-url', API_BASE_URL, '--anon-key', anonKey, '--skip-install'],
+            { maxBuffer: 10 * 1024 * 1024, cwd: tempDir }
+          );
 
           const output = stdout || stderr || '';
           if (output.toLowerCase().includes('error') && !output.includes('successfully')) {
             throw new Error(`Failed to download template: ${output}`);
           }
 
+          const frameName = frame === 'nextjs' ? 'Next.js' : 'React';
+
           return await addBackgroundContext({
             content: [{
               type: 'text',
-              text: `✅ React template downloaded successfully
+              text: `✅ ${frameName} template downloaded successfully
 
 📁 Template Location: ${templatePath}
 

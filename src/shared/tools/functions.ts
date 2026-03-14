@@ -22,6 +22,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
       'create-function',
       'Create a new edge function that runs in Deno runtime',
       {
+        apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
         ...uploadFunctionRequestSchema.omit({ code: true }).shape,
         code: z.string().describe(
           'The function code as a string. Must export: module.exports = async function(request) { return new Response(...) }'
@@ -34,7 +35,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'x-api-key': getApiKey(),
+              'x-api-key': getApiKey(args.apiKey),
             },
             body: JSON.stringify({
               slug: args.slug,
@@ -64,6 +65,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
       'create-function',
       'Create a new edge function that runs in Deno runtime. The code must be written to a file first for version control',
       {
+        apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
         ...uploadFunctionRequestSchema.omit({ code: true }).shape,
         codeFile: z.string().describe(
           'Path to JavaScript file containing the function code. Must export: module.exports = async function(request) { return new Response(...) }'
@@ -85,7 +87,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'x-api-key': getApiKey(),
+              'x-api-key': getApiKey(args.apiKey),
             },
             body: JSON.stringify({
               slug: args.slug,
@@ -115,6 +117,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
     'get-function',
     'Get details of a specific edge function including its code',
     {
+      apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
       slug: z.string().describe('The slug identifier of the function'),
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -122,7 +125,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
       try {
         const response = await fetch(`${API_BASE_URL}/api/functions/${args.slug}`, {
           method: 'GET',
-          headers: { 'x-api-key': getApiKey() },
+          headers: { 'x-api-key': getApiKey(args.apiKey) },
         });
 
         const result = await handleApiResponse(response);
@@ -145,6 +148,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
       'update-function',
       'Update an existing edge function code or metadata',
       {
+        apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
         slug: z.string().describe('The slug identifier of the function to update'),
         ...updateFunctionRequestSchema.omit({ code: true }).shape,
         code: z.string().optional().describe(
@@ -164,7 +168,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
             method: 'PUT',
             headers: {
               'Content-Type': 'application/json',
-              'x-api-key': getApiKey(),
+              'x-api-key': getApiKey(args.apiKey),
             },
             body: JSON.stringify(updateData),
           });
@@ -188,6 +192,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
       'update-function',
       'Update an existing edge function code or metadata',
       {
+        apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
         slug: z.string().describe('The slug identifier of the function to update'),
         ...updateFunctionRequestSchema.omit({ code: true }).shape,
         codeFile: z.string().optional().describe(
@@ -217,7 +222,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
             method: 'PUT',
             headers: {
               'Content-Type': 'application/json',
-              'x-api-key': getApiKey(),
+              'x-api-key': getApiKey(args.apiKey),
             },
             body: JSON.stringify(updateData),
           });
@@ -243,6 +248,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
     'delete-function',
     'Delete an edge function permanently',
     {
+      apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
       slug: z.string().describe('The slug identifier of the function to delete'),
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -250,7 +256,7 @@ export function registerFunctionTools(ctx: RegisterContext): void {
       try {
         const response = await fetch(`${API_BASE_URL}/api/functions/${args.slug}`, {
           method: 'DELETE',
-          headers: { 'x-api-key': getApiKey() },
+          headers: { 'x-api-key': getApiKey(args.apiKey) },
         });
 
         const result = await handleApiResponse(response);

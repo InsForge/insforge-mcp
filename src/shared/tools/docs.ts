@@ -91,6 +91,7 @@ export function registerDocsTools(ctx: RegisterContext): void {
         }
         return {
           content: [{ type: 'text' as const, text: `Error fetching ${docType} documentation: ${errMsg}` }],
+          isError: true,
         };
       }
     })
@@ -121,6 +122,7 @@ Supported languages: ${sdkLanguageSchema.options.join(', ')}`,
         }
         return {
           content: [{ type: 'text' as const, text: `Error fetching ${sdkFeature}-${sdkLanguage} documentation: ${errMsg}` }],
+          isError: true,
         };
       }
     })

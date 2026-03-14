@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import fetch from 'node-fetch';
-import { promises as fs } from 'fs';
+import { promises as fs, createWriteStream, createReadStream } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import archiver from 'archiver';
 import FormData from 'form-data';
 import { handleApiResponse, formatSuccessMessage } from '../response-handler.js';
@@ -231,13 +233,16 @@ Run each step in order. If any step fails, do not proceed to the next step.`;
           const createResult: CreateDeploymentResponse = await handleApiResponse(createResponse);
           const { id: deploymentId, uploadUrl, uploadFields } = createResult;
 
-          const zipBuffer = await new Promise<Buffer>((resolve, reject) => {
-            const archive = archiver('zip', { zlib: { level: 9 } });
-            const chunks: Buffer[] = [];
+          // Write archive to a temp file so we know the size before uploading
+          // (S3 presigned POSTs require Content-Length; streaming without it fails)
+          const tmpZipPath = join(tmpdir(), `insforge-deploy-${deploymentId}.zip`);
 
-            archive.on('data', (chunk: Buffer) => chunks.push(chunk));
-            archive.on('end', () => resolve(Buffer.concat(chunks)));
-            archive.on('error', (err: Error) => reject(err));
+          await new Promise<void>((resolve, reject) => {
+            const archive = archiver('zip', { zlib: { level: 9 } });
+            const output = createWriteStream(tmpZipPath);
+
+            output.on('close', resolve);
+            archive.on('error', reject);
 
             const excludePatterns = ['node_modules', '.git', '.next', '.env', '.env.local', 'dist', 'build', '.DS_Store'];
 
@@ -259,16 +264,20 @@ Run each step in order. If any step fails, do not proceed to the next step.`;
               return entry;
             });
 
+            archive.pipe(output);
             archive.finalize();
           });
+
+          const { size: zipSize } = await fs.stat(tmpZipPath);
 
           const uploadFormData = new FormData();
           for (const [key, value] of Object.entries(uploadFields)) {
             uploadFormData.append(key, value);
           }
-          uploadFormData.append('file', zipBuffer, {
+          uploadFormData.append('file', createReadStream(tmpZipPath), {
             filename: 'deployment.zip',
             contentType: 'application/zip',
+            knownLength: zipSize,
           });
 
           const uploadResponse = await fetch(uploadUrl, {
@@ -276,6 +285,9 @@ Run each step in order. If any step fails, do not proceed to the next step.`;
             body: uploadFormData,
             headers: uploadFormData.getHeaders(),
           });
+
+          // Clean up temp zip regardless of upload outcome
+          await fs.rm(tmpZipPath, { force: true });
 
           if (!uploadResponse.ok) {
             const uploadError = await uploadResponse.text();

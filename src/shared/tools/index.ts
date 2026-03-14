@@ -115,17 +115,30 @@ function shouldRegisterTool(toolName: string, backendVersion: string): boolean {
  * @throws Error if backend is unreachable
  */
 async function fetchBackendVersion(apiBaseUrl: string): Promise<string> {
-  const response = await fetch(`${apiBaseUrl}/api/health`, {
-    method: 'GET',
-    headers: { 'Content-Type': 'application/json' },
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
 
-  if (!response.ok) {
-    throw new Error(`Health check failed with status ${response.status}`);
+  try {
+    const response = await fetch(`${apiBaseUrl}/api/health`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Health check failed with status ${response.status}`);
+    }
+
+    const health = await response.json() as HealthCheckResponse;
+    return health.version;
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`Health check timed out after 10s — is the backend running at ${apiBaseUrl}?`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  const health = await response.json() as HealthCheckResponse;
-  return health.version;
 }
 
 /**
@@ -140,8 +153,15 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
 
   const usageTracker = new UsageTracker(API_BASE_URL, GLOBAL_API_KEY);
 
-  const backendVersion = await fetchBackendVersion(API_BASE_URL);
-  console.error(`Backend version: ${backendVersion}`);
+  let backendVersion: string;
+  try {
+    backendVersion = await fetchBackendVersion(API_BASE_URL);
+    console.error(`Backend version: ${backendVersion}`);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error(`Failed to fetch backend version: ${msg}`);
+    throw new Error(`Cannot initialize tools: backend at ${API_BASE_URL} is unreachable. ${msg}`);
+  }
 
   let toolCount = 0;
 
