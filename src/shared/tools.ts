@@ -71,6 +71,64 @@ interface ToolVersionRequirement {
  * - { minVersion: '1.1.0', maxVersion: '2.0.0' } - Available only between v1.1.0 and v2.0.0
  * - Not in map - Available for all versions
  */
+// Argument types for function tools (inferred from zod schemas, used for type-safe handlers)
+interface CreateFunctionArgsRemote {
+  slug: string;
+  name: string;
+  code: string;
+  description?: string;
+  status?: string;
+}
+interface CreateFunctionArgsLocal {
+  slug: string;
+  name: string;
+  codeFile: string;
+  description?: string;
+  status?: string;
+}
+interface GetFunctionArgs {
+  slug: string;
+}
+interface UpdateFunctionArgsRemote {
+  slug: string;
+  name?: string;
+  code?: string;
+  description?: string;
+  status?: string;
+}
+interface UpdateFunctionArgsLocal {
+  slug: string;
+  name?: string;
+  codeFile?: string;
+  description?: string;
+  status?: string;
+}
+interface DeleteFunctionArgs {
+  slug: string;
+}
+
+/** API response shapes where we need to access properties (narrow after handleApiResponse) */
+interface BulkUpsertApiResult {
+  success: boolean;
+  rowsAffected: number;
+  totalRecords: number;
+  table: string;
+  message?: string;
+  errors?: unknown;
+}
+interface AnonTokenResponse {
+  accessToken: string;
+}
+
+function isDocResponse(value: unknown): value is { content: string } {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'content' in value &&
+    typeof (value as { content: unknown }).content === 'string'
+  );
+}
+
 const TOOL_VERSION_REQUIREMENTS: Record<string, ToolVersionRequirement> = {
   // Schedule tools - require backend v1.1.1+
   // 'upsert-schedule': { minVersion: '1.1.1' },
@@ -185,16 +243,15 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
   // Track registered tool count
   let toolCount = 0;
 
-  // Helper to register a tool with version checking
-  // Using 'any' for args to handle server.tool's multiple overloads
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const registerTool = (toolName: string, ...args: any[]) => {
+  // Helper to register a tool with version checking.
+  // Uses unknown[] to avoid 'any'; server.tool has multiple overloads so we type the call explicitly.
+  const registerTool = (toolName: string, ...args: unknown[]) => {
     if (isRemote && LOCAL_ONLY_TOOLS.has(toolName)) {
       console.error(`Skipping tool '${toolName}': requires local filesystem (remote mode)`);
       return false;
     }
     if (shouldRegisterTool(toolName, backendVersion)) {
-      (server.tool as any)(toolName, ...args);
+      (server.tool as (name: string, ...rest: unknown[]) => void)(toolName, ...args);
       toolCount++;
       return true;
     } else {
@@ -257,7 +314,7 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
 
       const result = await handleApiResponse(response);
 
-      if (result && typeof result === 'object' && 'content' in result) {
+      if (isDocResponse(result)) {
         let content = result.content;
         // Replace all example/placeholder URLs with actual API_BASE_URL
         // Handle URLs whether they're in backticks, quotes, or standalone
@@ -291,7 +348,7 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
 
       const result = await handleApiResponse(response);
 
-      if (result && typeof result === 'object' && 'content' in result) {
+      if (isDocResponse(result)) {
         let content = result.content;
         // Replace all example/placeholder URLs with actual API_BASE_URL
         // Handle URLs whether they're in backticks, quotes, or standalone
@@ -640,7 +697,7 @@ Supported languages: ${sdkLanguageSchema.options.join(', ')}`,
             },
           });
 
-          const result = await handleApiResponse(response);
+          const result = await handleApiResponse(response) as AnonTokenResponse;
           const anonKey = result.accessToken;
 
           if (!anonKey) {
@@ -704,7 +761,7 @@ After the command completes, \`cd ${shellEsc(targetDir)}\` and start developing.
             },
           });
 
-          const result = await handleApiResponse(response);
+          const result = await handleApiResponse(response) as AnonTokenResponse;
           const anonKey = result.accessToken;
 
           if (!anonKey) {
@@ -814,9 +871,8 @@ To: Your current project directory
           body: formData,
         });
         
-        const result = await handleApiResponse(response);
-        
-        // Format the result message
+        const result = await handleApiResponse(response) as BulkUpsertApiResult;
+
         const message = result.success
           ? `Successfully processed ${result.rowsAffected} of ${result.totalRecords} records into table "${result.table}"`
           : result.message || 'Bulk upsert operation completed';
@@ -1001,7 +1057,7 @@ To: Your current project directory
             'The function code as a string. Must export: module.exports = async function(request) { return new Response(...) }'
           ),
       },
-      withUsageTracking('create-function', async (args: any) => {
+      withUsageTracking('create-function', async (args: CreateFunctionArgsRemote) => {
         try {
           const response = await fetch(`${API_BASE_URL}/api/functions`, {
             method: 'POST',
@@ -1058,7 +1114,7 @@ To: Your current project directory
             'Path to JavaScript file containing the function code. Must export: module.exports = async function(request) { return new Response(...) }'
           ),
       },
-      withUsageTracking('create-function', async (args: any) => {
+      withUsageTracking('create-function', async (args: CreateFunctionArgsLocal) => {
         try {
           let code: string;
           try {
@@ -1119,7 +1175,7 @@ To: Your current project directory
     {
       slug: z.string().describe('The slug identifier of the function'),
     },
-    withUsageTracking('get-function', async (args: any) => {
+    withUsageTracking('get-function', async (args: GetFunctionArgs) => {
       try {
         const response = await fetch(`${API_BASE_URL}/api/functions/${args.slug}`, {
           method: 'GET',
@@ -1168,7 +1224,7 @@ To: Your current project directory
             'The new function code as a string. Must export: module.exports = async function(request) { return new Response(...) }'
           ),
       },
-      withUsageTracking('update-function', async (args: any) => {
+      withUsageTracking('update-function', async (args: UpdateFunctionArgsRemote) => {
         try {
           const updateData: UpdateFunctionRequest = {};
           if (args.name) {
@@ -1235,7 +1291,7 @@ To: Your current project directory
             'Path to JavaScript file containing the new function code. Must export: module.exports = async function(request) { return new Response(...) }'
           ),
       },
-      withUsageTracking('update-function', async (args: any) => {
+      withUsageTracking('update-function', async (args: UpdateFunctionArgsLocal) => {
         try {
           const updateData: UpdateFunctionRequest = {};
           if (args.name) {
@@ -1305,7 +1361,7 @@ To: Your current project directory
     {
       slug: z.string().describe('The slug identifier of the function to delete'),
     },
-    withUsageTracking('delete-function', async (args: any) => {
+    withUsageTracking('delete-function', async (args: DeleteFunctionArgs) => {
       try {
         const response = await fetch(`${API_BASE_URL}/api/functions/${args.slug}`, {
           method: 'DELETE',
@@ -1426,7 +1482,7 @@ To: Your current project directory
             },
           });
 
-          const createResult: CreateDeploymentResponse = await handleApiResponse(createResponse);
+          const createResult = await handleApiResponse(createResponse) as CreateDeploymentResponse;
           const { id: deploymentId, uploadUrl, uploadFields } = createResult;
 
           const esc = shellEsc;
@@ -1600,7 +1656,7 @@ Run each step in order. If any step fails, do not proceed to the next step.`;
             },
           });
 
-          const createResult: CreateDeploymentResponse = await handleApiResponse(createResponse);
+          const createResult = await handleApiResponse(createResponse) as CreateDeploymentResponse;
           const { id: deploymentId, uploadUrl, uploadFields } = createResult;
 
           // Step 2: Create zip in memory using archiver (cross-platform)
