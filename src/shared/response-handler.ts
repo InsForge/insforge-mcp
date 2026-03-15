@@ -1,21 +1,21 @@
 // Helper functions to handle traditional REST response format
 
 interface ErrorResponse {
-  error: string;
-  message: string;
-  statusCode: number;
+  error?: string;
+  message?: string;
+  statusCode?: number;
   nextAction?: string;
 }
 
 // Type guard to check if the value is an ErrorResponse
 function isErrorResponse(value: unknown): value is ErrorResponse {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'error' in value &&
-    'message' in value &&
-    'statusCode' in value
-  );
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const hasMessage = typeof v.message === 'string';
+  const hasError = typeof v.error === 'string';
+  const hasStatusCode = typeof v.statusCode === 'number';
+  const hasNextAction = !('nextAction' in v) || typeof v.nextAction === 'string';
+  return (hasMessage || hasError || hasStatusCode) && hasNextAction;
 }
 
 // Minimal type for fetch Response
@@ -29,8 +29,8 @@ export async function handleApiResponse(response: FetchResponse): Promise<unknow
 
   if (!response.ok) {
     if (isErrorResponse(responseData)) {
-      let fullMessage = responseData.message || responseData.error || 'Unknown error';
-      if (responseData.nextAction) {
+      let fullMessage = responseData.message ?? responseData.error ?? 'Unknown error';
+      if (typeof responseData.nextAction === 'string' && responseData.nextAction.length > 0) {
         fullMessage += `. ${responseData.nextAction}`;
       }
       throw new Error(fullMessage);
