@@ -212,10 +212,14 @@ function isCreateDeploymentResponse(obj: unknown): obj is CreateDeploymentRespon
     (typeof value.id === 'string' || typeof value.id === 'number');
 
   const urlOk =
-    typeof value.uploadUrl === 'string' && value.uploadUrl.length > 0;
+    'uploadUrl' in value &&
+    typeof value.uploadUrl === 'string' &&
+    value.uploadUrl.length > 0;
 
   const fieldsOk =
-    typeof value.uploadFields === 'object' && value.uploadFields !== null;
+    'uploadFields' in value &&
+    typeof value.uploadFields === 'object' &&
+    value.uploadFields !== null;
 
   return idOk && urlOk && fieldsOk;
 }
@@ -794,10 +798,6 @@ Supported languages: ${sdkLanguageSchema.options.join(', ')}`,
           }
           const anonKey = anonResult.accessToken;
 
-          if (!anonKey) {
-            throw new Error('Failed to retrieve anon key from backend');
-          }
-
           const targetDir = projectName || `insforge-${frame}`;
 
           const instructions = `Template configuration ready. Please run the following command in your project's parent directory:
@@ -860,10 +860,6 @@ After the command completes, \`cd ${shellEsc(targetDir)}\` and start developing.
             throw new Error('Invalid anon token response from backend');
           }
           const anonKey = anonResult.accessToken;
-
-          if (!anonKey) {
-            throw new Error('Failed to retrieve anon key from backend');
-          }
 
           // Create temp directory for download
           const tempDir = tmpdir();
