@@ -71,6 +71,159 @@ interface ToolVersionRequirement {
  * - { minVersion: '1.1.0', maxVersion: '2.0.0' } - Available only between v1.1.0 and v2.0.0
  * - Not in map - Available for all versions
  */
+
+// Argument schemas and types for function tools (derived from zod, used for type-safe handlers)
+const createFunctionRemoteSchema = z.object({
+  ...uploadFunctionRequestSchema.omit({ code: true }).shape,
+  code: z
+    .string()
+    .describe(
+      'The function code as a string. Must export: module.exports = async function(request) { return new Response(...) }'
+    ),
+});
+type CreateFunctionArgsRemote = z.infer<typeof createFunctionRemoteSchema>;
+
+const createFunctionLocalSchema = z.object({
+  ...uploadFunctionRequestSchema.omit({ code: true }).shape,
+  codeFile: z
+    .string()
+    .describe(
+      'Path to JavaScript file containing the function code. Must export: module.exports = async function(request) { return new Response(...) }'
+    ),
+});
+type CreateFunctionArgsLocal = z.infer<typeof createFunctionLocalSchema>;
+
+const getFunctionSchema = z.object({
+  slug: z.string().describe('The slug identifier of the function'),
+});
+type GetFunctionArgs = z.infer<typeof getFunctionSchema>;
+
+const updateFunctionRemoteSchema = z.object({
+  slug: z.string().describe('The slug identifier of the function to update'),
+  ...updateFunctionRequestSchema.omit({ code: true }).shape,
+  code: z
+    .string()
+    .optional()
+    .describe(
+      'The new function code as a string. Must export: module.exports = async function(request) { return new Response(...) }'
+    ),
+});
+type UpdateFunctionArgsRemote = z.infer<typeof updateFunctionRemoteSchema>;
+
+const updateFunctionLocalSchema = z.object({
+  slug: z.string().describe('The slug identifier of the function to update'),
+  ...updateFunctionRequestSchema.omit({ code: true }).shape,
+  codeFile: z
+    .string()
+    .optional()
+    .describe(
+      'Path to JavaScript file containing the new function code. Must export: module.exports = async function(request) { return new Response(...) }'
+    ),
+});
+type UpdateFunctionArgsLocal = z.infer<typeof updateFunctionLocalSchema>;
+
+const deleteFunctionSchema = z.object({
+  slug: z.string().describe('The slug identifier of the function to delete'),
+});
+type DeleteFunctionArgs = z.infer<typeof deleteFunctionSchema>;
+
+/** API response shapes where we need to access properties (narrow after handleApiResponse) */
+interface BulkUpsertApiResult {
+  success: boolean;
+  rowsAffected: number;
+  totalRecords: number;
+  table: string;
+  message?: string;
+  errors?: unknown;
+}
+interface AnonTokenResponse {
+  accessToken: string;
+}
+
+function isDocResponse(value: unknown): value is { content: string } {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'content' in value &&
+    typeof (value as { content: unknown }).content === 'string'
+  );
+}
+
+function isAnonTokenResponse(obj: unknown): obj is AnonTokenResponse {
+  return (
+    typeof obj === 'object' &&
+    obj !== null &&
+    'accessToken' in obj &&
+    typeof (obj as { accessToken: unknown }).accessToken === 'string' &&
+    (obj as { accessToken: string }).accessToken.length > 0
+  );
+}
+
+function isBulkUpsertApiResult(obj: unknown): obj is BulkUpsertApiResult {
+  if (
+    typeof obj !== 'object' ||
+    obj === null ||
+    !('success' in obj) ||
+    !('rowsAffected' in obj) ||
+    !('totalRecords' in obj) ||
+    !('table' in obj)
+  ) {
+    return false;
+  }
+
+  const value = obj as {
+    success: unknown;
+    rowsAffected: unknown;
+    totalRecords: unknown;
+    table: unknown;
+    message?: unknown;
+  };
+
+  if (
+    typeof value.success !== 'boolean' ||
+    typeof value.rowsAffected !== 'number' ||
+    typeof value.totalRecords !== 'number' ||
+    typeof value.table !== 'string' ||
+    value.table.length === 0
+  ) {
+    return false;
+  }
+
+  if (value.message !== undefined && typeof value.message !== 'string') {
+    return false;
+  }
+
+  return true;
+}
+
+function isCreateDeploymentResponse(obj: unknown): obj is CreateDeploymentResponse {
+  if (typeof obj !== 'object' || obj === null) {
+    return false;
+  }
+
+  const value = obj as {
+    id?: unknown;
+    uploadUrl?: unknown;
+    uploadFields?: unknown;
+  };
+
+  const idOk =
+    'id' in value &&
+    (typeof value.id === 'string' || typeof value.id === 'number');
+
+  const urlOk =
+    'uploadUrl' in value &&
+    typeof value.uploadUrl === 'string' &&
+    value.uploadUrl.length > 0;
+
+  const fieldsOk =
+    'uploadFields' in value &&
+    typeof value.uploadFields === 'object' &&
+    value.uploadFields !== null;
+
+  return idOk && urlOk && fieldsOk;
+}
+
 const TOOL_VERSION_REQUIREMENTS: Record<string, ToolVersionRequirement> = {
   // Schedule tools - require backend v1.1.1+
   // 'upsert-schedule': { minVersion: '1.1.1' },
@@ -185,16 +338,15 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
   // Track registered tool count
   let toolCount = 0;
 
-  // Helper to register a tool with version checking
-  // Using 'any' for args to handle server.tool's multiple overloads
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const registerTool = (toolName: string, ...args: any[]) => {
+  // Helper to register a tool with version checking.
+  // Uses unknown[] to avoid 'any'; server.tool has multiple overloads so we type the call explicitly.
+  const registerTool = (toolName: string, ...args: unknown[]) => {
     if (isRemote && LOCAL_ONLY_TOOLS.has(toolName)) {
       console.error(`Skipping tool '${toolName}': requires local filesystem (remote mode)`);
       return false;
     }
     if (shouldRegisterTool(toolName, backendVersion)) {
-      (server.tool as any)(toolName, ...args);
+      (server.tool as (name: string, ...rest: unknown[]) => void)(toolName, ...args);
       toolCount++;
       return true;
     } else {
@@ -257,7 +409,7 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
 
       const result = await handleApiResponse(response);
 
-      if (result && typeof result === 'object' && 'content' in result) {
+      if (isDocResponse(result)) {
         let content = result.content;
         // Replace all example/placeholder URLs with actual API_BASE_URL
         // Handle URLs whether they're in backticks, quotes, or standalone
@@ -291,7 +443,7 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
 
       const result = await handleApiResponse(response);
 
-      if (result && typeof result === 'object' && 'content' in result) {
+      if (isDocResponse(result)) {
         let content = result.content;
         // Replace all example/placeholder URLs with actual API_BASE_URL
         // Handle URLs whether they're in backticks, quotes, or standalone
@@ -640,12 +792,11 @@ Supported languages: ${sdkLanguageSchema.options.join(', ')}`,
             },
           });
 
-          const result = await handleApiResponse(response);
-          const anonKey = result.accessToken;
-
-          if (!anonKey) {
-            throw new Error('Failed to retrieve anon key from backend');
+          const anonResult = await handleApiResponse(response);
+          if (!isAnonTokenResponse(anonResult)) {
+            throw new Error('Invalid anon token response from backend');
           }
+          const anonKey = anonResult.accessToken;
 
           const targetDir = projectName || `insforge-${frame}`;
 
@@ -704,12 +855,11 @@ After the command completes, \`cd ${shellEsc(targetDir)}\` and start developing.
             },
           });
 
-          const result = await handleApiResponse(response);
-          const anonKey = result.accessToken;
-
-          if (!anonKey) {
-            throw new Error('Failed to retrieve anon key from backend');
+          const anonResult = await handleApiResponse(response);
+          if (!isAnonTokenResponse(anonResult)) {
+            throw new Error('Invalid anon token response from backend');
           }
+          const anonKey = anonResult.accessToken;
 
           // Create temp directory for download
           const tempDir = tmpdir();
@@ -814,23 +964,25 @@ To: Your current project directory
           body: formData,
         });
         
-        const result = await handleApiResponse(response);
-        
-        // Format the result message
-        const message = result.success
-          ? `Successfully processed ${result.rowsAffected} of ${result.totalRecords} records into table "${result.table}"`
-          : result.message || 'Bulk upsert operation completed';
+        const rawResult = await handleApiResponse(response);
+        if (!isBulkUpsertApiResult(rawResult)) {
+          throw new Error('Invalid bulk upsert response from backend');
+        }
+
+        const message = rawResult.success
+          ? `Successfully processed ${rawResult.rowsAffected} of ${rawResult.totalRecords} records into table "${rawResult.table}"`
+          : rawResult.message || 'Bulk upsert operation completed';
 
         return await addBackgroundContext({
           content: [
             {
               type: 'text',
               text: formatSuccessMessage('Bulk upsert completed', {
-                message,
-                table: result.table,
-                rowsAffected: result.rowsAffected,
-                totalRecords: result.totalRecords,
-                errors: result.errors,
+                  message,
+                  table: rawResult.table,
+                  rowsAffected: rawResult.rowsAffected,
+                  totalRecords: rawResult.totalRecords,
+                  errors: rawResult.errors,
               }),
             },
           ],
@@ -993,15 +1145,8 @@ To: Your current project directory
     registerTool(
       'create-function',
       'Create a new edge function that runs in Deno runtime',
-      {
-        ...uploadFunctionRequestSchema.omit({ code: true }).shape,
-        code: z
-          .string()
-          .describe(
-            'The function code as a string. Must export: module.exports = async function(request) { return new Response(...) }'
-          ),
-      },
-      withUsageTracking('create-function', async (args: any) => {
+      createFunctionRemoteSchema.shape,
+      withUsageTracking('create-function', async (args: CreateFunctionArgsRemote) => {
         try {
           const response = await fetch(`${API_BASE_URL}/api/functions`, {
             method: 'POST',
@@ -1050,15 +1195,8 @@ To: Your current project directory
     registerTool(
       'create-function',
       'Create a new edge function that runs in Deno runtime. The code must be written to a file first for version control',
-      {
-        ...uploadFunctionRequestSchema.omit({ code: true }).shape,
-        codeFile: z
-          .string()
-          .describe(
-            'Path to JavaScript file containing the function code. Must export: module.exports = async function(request) { return new Response(...) }'
-          ),
-      },
-      withUsageTracking('create-function', async (args: any) => {
+      createFunctionLocalSchema.shape,
+      withUsageTracking('create-function', async (args: CreateFunctionArgsLocal) => {
         try {
           let code: string;
           try {
@@ -1116,10 +1254,8 @@ To: Your current project directory
   registerTool(
     'get-function',
     'Get details of a specific edge function including its code',
-    {
-      slug: z.string().describe('The slug identifier of the function'),
-    },
-    withUsageTracking('get-function', async (args: any) => {
+    getFunctionSchema.shape,
+    withUsageTracking('get-function', async (args: GetFunctionArgs) => {
       try {
         const response = await fetch(`${API_BASE_URL}/api/functions/${args.slug}`, {
           method: 'GET',
@@ -1158,17 +1294,8 @@ To: Your current project directory
     registerTool(
       'update-function',
       'Update an existing edge function code or metadata',
-      {
-        slug: z.string().describe('The slug identifier of the function to update'),
-        ...updateFunctionRequestSchema.omit({ code: true }).shape,
-        code: z
-          .string()
-          .optional()
-          .describe(
-            'The new function code as a string. Must export: module.exports = async function(request) { return new Response(...) }'
-          ),
-      },
-      withUsageTracking('update-function', async (args: any) => {
+      updateFunctionRemoteSchema.shape,
+      withUsageTracking('update-function', async (args: UpdateFunctionArgsRemote) => {
         try {
           const updateData: UpdateFunctionRequest = {};
           if (args.name) {
@@ -1225,17 +1352,8 @@ To: Your current project directory
     registerTool(
       'update-function',
       'Update an existing edge function code or metadata',
-      {
-        slug: z.string().describe('The slug identifier of the function to update'),
-        ...updateFunctionRequestSchema.omit({ code: true }).shape,
-        codeFile: z
-          .string()
-          .optional()
-          .describe(
-            'Path to JavaScript file containing the new function code. Must export: module.exports = async function(request) { return new Response(...) }'
-          ),
-      },
-      withUsageTracking('update-function', async (args: any) => {
+      updateFunctionLocalSchema.shape,
+      withUsageTracking('update-function', async (args: UpdateFunctionArgsLocal) => {
         try {
           const updateData: UpdateFunctionRequest = {};
           if (args.name) {
@@ -1302,10 +1420,8 @@ To: Your current project directory
   registerTool(
     'delete-function',
     'Delete an edge function permanently',
-    {
-      slug: z.string().describe('The slug identifier of the function to delete'),
-    },
-    withUsageTracking('delete-function', async (args: any) => {
+    deleteFunctionSchema.shape,
+    withUsageTracking('delete-function', async (args: DeleteFunctionArgs) => {
       try {
         const response = await fetch(`${API_BASE_URL}/api/functions/${args.slug}`, {
           method: 'DELETE',
@@ -1426,7 +1542,10 @@ To: Your current project directory
             },
           });
 
-          const createResult: CreateDeploymentResponse = await handleApiResponse(createResponse);
+          const createResult = await handleApiResponse(createResponse);
+          if (!isCreateDeploymentResponse(createResult)) {
+            throw new Error('Invalid deployment creation response from backend');
+          }
           const { id: deploymentId, uploadUrl, uploadFields } = createResult;
 
           const esc = shellEsc;
@@ -1600,7 +1719,10 @@ Run each step in order. If any step fails, do not proceed to the next step.`;
             },
           });
 
-          const createResult: CreateDeploymentResponse = await handleApiResponse(createResponse);
+          const createResult = await handleApiResponse(createResponse);
+          if (!isCreateDeploymentResponse(createResult)) {
+            throw new Error('Invalid deployment creation response from backend');
+          }
           const { id: deploymentId, uploadUrl, uploadFields } = createResult;
 
           // Step 2: Create zip in memory using archiver (cross-platform)
