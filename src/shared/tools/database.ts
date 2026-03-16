@@ -13,11 +13,9 @@ import {
   bulkUpsertRequestSchema,
 } from '@insforge/shared-schemas';
 import type { RegisterContext } from './types.js';
+import { shellEsc } from './utils.js';
 
 const execFileAsync = promisify(execFile);
-
-/** Shell-escape a value by wrapping in single quotes and escaping embedded single quotes */
-const shellEsc = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 
 export function registerDatabaseTools(ctx: RegisterContext): void {
   const { API_BASE_URL, isRemote, registerTool, withUsageTracking, getApiKey, addBackgroundContext } = ctx;

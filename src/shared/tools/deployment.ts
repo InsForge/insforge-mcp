@@ -12,9 +12,7 @@ import {
   startDeploymentRequestSchema,
 } from '@insforge/shared-schemas';
 import type { RegisterContext } from './types.js';
-
-/** Shell-escape a value by wrapping in single quotes and escaping embedded single quotes */
-const shellEsc = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
+import { shellEsc } from './utils.js';
 
 export function registerDeploymentTools(ctx: RegisterContext): void {
   const { API_BASE_URL, isRemote, registerTool, withUsageTracking, getApiKey, addBackgroundContext } = ctx;
