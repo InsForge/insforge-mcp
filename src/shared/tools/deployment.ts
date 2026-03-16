@@ -14,6 +14,34 @@ import {
 import type { RegisterContext } from './types.js';
 import { shellEsc } from './utils.js';
 
+function isCreateDeploymentResponse(obj: unknown): obj is CreateDeploymentResponse {
+  if (typeof obj !== 'object' || obj === null) {
+    return false;
+  }
+
+  const value = obj as {
+    id?: unknown;
+    uploadUrl?: unknown;
+    uploadFields?: unknown;
+  };
+
+  const idOk =
+    'id' in value &&
+    (typeof value.id === 'string' || typeof value.id === 'number');
+
+  const urlOk =
+    'uploadUrl' in value &&
+    typeof value.uploadUrl === 'string' &&
+    value.uploadUrl.length > 0;
+
+  const fieldsOk =
+    'uploadFields' in value &&
+    typeof value.uploadFields === 'object' &&
+    value.uploadFields !== null;
+
+  return idOk && urlOk && fieldsOk;
+}
+
 export function registerDeploymentTools(ctx: RegisterContext): void {
   const { API_BASE_URL, isRemote, registerTool, withUsageTracking, getApiKey, addBackgroundContext } = ctx;
 
@@ -95,7 +123,10 @@ export function registerDeploymentTools(ctx: RegisterContext): void {
             },
           });
 
-          const createResult: CreateDeploymentResponse = await handleApiResponse(createResponse);
+          const createResult = await handleApiResponse(createResponse);
+          if (!isCreateDeploymentResponse(createResult)) {
+            throw new Error('Unexpected response format from deployments endpoint');
+          }
           const { id: deploymentId, uploadUrl, uploadFields } = createResult;
 
           const esc = shellEsc;
@@ -239,7 +270,10 @@ Run each step in order. If any step fails, do not proceed to the next step.`;
             },
           });
 
-          const createResult: CreateDeploymentResponse = await handleApiResponse(createResponse);
+          const createResult = await handleApiResponse(createResponse);
+          if (!isCreateDeploymentResponse(createResult)) {
+            throw new Error('Unexpected response format from deployments endpoint');
+          }
           const { id: deploymentId, uploadUrl, uploadFields } = createResult;
 
           // Write archive to a temp file so we know the size before uploading

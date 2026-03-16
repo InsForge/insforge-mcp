@@ -17,6 +17,66 @@ import { shellEsc } from './utils.js';
 
 const execFileAsync = promisify(execFile);
 
+interface BulkUpsertApiResult {
+  success: boolean;
+  rowsAffected: number;
+  totalRecords: number;
+  table: string;
+  message?: string;
+  errors?: unknown;
+}
+
+interface AnonTokenResponse {
+  accessToken: string;
+}
+
+function isAnonTokenResponse(obj: unknown): obj is AnonTokenResponse {
+  return (
+    typeof obj === 'object' &&
+    obj !== null &&
+    'accessToken' in obj &&
+    typeof (obj as { accessToken: unknown }).accessToken === 'string' &&
+    (obj as { accessToken: string }).accessToken.length > 0
+  );
+}
+
+function isBulkUpsertApiResult(obj: unknown): obj is BulkUpsertApiResult {
+  if (
+    typeof obj !== 'object' ||
+    obj === null ||
+    !('success' in obj) ||
+    !('rowsAffected' in obj) ||
+    !('totalRecords' in obj) ||
+    !('table' in obj)
+  ) {
+    return false;
+  }
+
+  const value = obj as {
+    success: unknown;
+    rowsAffected: unknown;
+    totalRecords: unknown;
+    table: unknown;
+    message?: unknown;
+  };
+
+  if (
+    typeof value.success !== 'boolean' ||
+    typeof value.rowsAffected !== 'number' ||
+    typeof value.totalRecords !== 'number' ||
+    typeof value.table !== 'string' ||
+    value.table.length === 0
+  ) {
+    return false;
+  }
+
+  if (value.message !== undefined && typeof value.message !== 'string') {
+    return false;
+  }
+
+  return true;
+}
+
 export function registerDatabaseTools(ctx: RegisterContext): void {
   const { API_BASE_URL, isRemote, registerTool, withUsageTracking, getApiKey, addBackgroundContext } = ctx;
 
@@ -135,12 +195,11 @@ export function registerDatabaseTools(ctx: RegisterContext): void {
             },
           });
 
-          const result = await handleApiResponse(response);
-          const anonKey = result.accessToken;
-
-          if (!anonKey) {
+          const anonResult = await handleApiResponse(response);
+          if (!isAnonTokenResponse(anonResult)) {
             throw new Error('Failed to retrieve anon key from backend');
           }
+          const anonKey = anonResult.accessToken;
 
           const rawDir = projectName || `insforge-${frame}`;
 
@@ -189,12 +248,11 @@ After the command completes, \`cd ${shellEsc(targetDir)}\` and start developing.
             },
           });
 
-          const result = await handleApiResponse(response);
-          const anonKey = result.accessToken;
-
-          if (!anonKey) {
+          const anonResult = await handleApiResponse(response);
+          if (!isAnonTokenResponse(anonResult)) {
             throw new Error('Failed to retrieve anon key from backend');
           }
+          const anonKey = anonResult.accessToken;
 
           const rawDir = projectName || `insforge-${frame}`;
 
@@ -279,21 +337,24 @@ To: Your current project directory
           body: formData,
         });
 
-        const result = await handleApiResponse(response);
+        const rawResult = await handleApiResponse(response);
+        if (!isBulkUpsertApiResult(rawResult)) {
+          throw new Error('Unexpected response format from bulk-upsert endpoint');
+        }
 
-        const message = result.success
-          ? `Successfully processed ${result.rowsAffected} of ${result.totalRecords} records into table "${result.table}"`
-          : result.message || 'Bulk upsert operation completed';
+        const message = rawResult.success
+          ? `Successfully processed ${rawResult.rowsAffected} of ${rawResult.totalRecords} records into table "${rawResult.table}"`
+          : rawResult.message || 'Bulk upsert operation completed';
 
         return await addBackgroundContext({
           content: [{
             type: 'text',
             text: formatSuccessMessage('Bulk upsert completed', {
               message,
-              table: result.table,
-              rowsAffected: result.rowsAffected,
-              totalRecords: result.totalRecords,
-              errors: result.errors,
+              table: rawResult.table,
+              rowsAffected: rawResult.rowsAffected,
+              totalRecords: rawResult.totalRecords,
+              errors: rawResult.errors,
             }),
           }],
         });
