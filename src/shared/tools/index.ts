@@ -210,10 +210,11 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
           typeof result === 'object' &&
           'isError' in (result as Record<string, unknown>) &&
           (result as Record<string, unknown>)['isError'] === true;
-        await trackToolUsage(toolName, !isStructuredError);
+        // Fire-and-forget: trackToolUsage already handles errors internally
+        void trackToolUsage(toolName, !isStructuredError);
         return result;
       } catch (error) {
-        await trackToolUsage(toolName, false);
+        void trackToolUsage(toolName, false);
         throw error;
       }
     };
