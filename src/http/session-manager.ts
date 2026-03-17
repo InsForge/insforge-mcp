@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { getRedisClient } from './redis.js';
-import { registerInsforgeTools } from '../shared/tools.js';
+import { registerInsforgeTools } from '../shared/tools/index.js';
 
 /**
  * Session data stored in Redis
