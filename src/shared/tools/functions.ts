@@ -80,7 +80,8 @@ export function registerFunctionTools(ctx: RegisterContext): void {
             code = await fs.readFile(args.codeFile, 'utf-8');
           } catch (fileError) {
             throw new Error(
-              `Failed to read code file '${args.codeFile}': ${fileError instanceof Error ? fileError.message : 'Unknown error'}`
+              `Failed to read code file '${args.codeFile}': ${fileError instanceof Error ? fileError.message : 'Unknown error'}`,
+              { cause: fileError }
             );
           }
 
@@ -211,7 +212,8 @@ export function registerFunctionTools(ctx: RegisterContext): void {
               updateData.code = await fs.readFile(args.codeFile, 'utf-8');
             } catch (fileError) {
               throw new Error(
-                `Failed to read code file '${args.codeFile}': ${fileError instanceof Error ? fileError.message : 'Unknown error'}`
+                `Failed to read code file '${args.codeFile}': ${fileError instanceof Error ? fileError.message : 'Unknown error'}`,
+                { cause: fileError }
               );
             }
           }

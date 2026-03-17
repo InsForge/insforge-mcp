@@ -13,7 +13,12 @@
     "dev:stdio": "tsx watch src/stdio/index.ts",
     "dev:http": "tsx watch src/http/server.ts",
     "build": "tsup",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint .",
+    "format": "prettier --write ."
   },
   "keywords": [
     "mcp",
@@ -50,12 +55,20 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/archiver": "^7.0.0",
     "@types/express": "^5.0.3",
     "@types/node": "^20.10.5",
+    "@vitest/coverage-v8": "^4.1.0",
+    "eslint": "^10.0.3",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.5",
+    "prettier": "^3.8.1",
     "rimraf": "^5.0.5",
     "tsup": "^8.5.0",
     "tsx": "^4.7.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "typescript-eslint": "^8.57.1",
+    "vitest": "^4.1.0"
   }
 }
