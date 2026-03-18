@@ -1,0 +1,40 @@
+name: Integration Tests (Real Project)
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run weekly on Sundays at 06:00 UTC
+    - cron: '0 6 * * 0'
+  push:
+    branches: [main, master]
+
+jobs:
+  integration-real:
+    runs-on: ubuntu-latest
+    # Only run when secrets are available (prevents failures on forks)
+    if: ${{ github.repository_owner == 'InsForge' }}
+
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run real-project integration tests
+        run: npm run test:integration:real
+        env:
+          INTEGRATION_TEST_ENABLED: 'true'
+          INSFORGE_CLIENT_SECRET: ${{ secrets.INSFORGE_API_KEY }}
+          INSFORGE_API_BASE: ${{ secrets.INSFORGE_API_BASE_URL }}
+          INTEGRATION_FUNCTION_SLUG: ${{ secrets.INSFORGE_FUNCTION_SLUG }}
+          INTEGRATION_TABLE_NAME: ${{ secrets.INSFORGE_TABLE_NAME }}
+          INTEGRATION_LOG_SOURCE: ${{ secrets.INSFORGE_LOG_SOURCE }}

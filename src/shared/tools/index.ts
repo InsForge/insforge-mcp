@@ -136,7 +136,7 @@ async function fetchBackendVersion(apiBaseUrl: string): Promise<string> {
     return health.version;
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`Health check timed out after 10s — is the backend running at ${apiBaseUrl}?`);
+      throw new Error(`Health check timed out after 10s — is the backend running at ${apiBaseUrl}?`, { cause: error });
     }
     throw error;
   } finally {
@@ -163,7 +163,7 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     console.error(`Failed to fetch backend version: ${msg}`);
-    throw new Error(`Cannot initialize tools: backend at ${API_BASE_URL} is unreachable. ${msg}`);
+    throw new Error(`Cannot initialize tools: backend at ${API_BASE_URL} is unreachable. ${msg}`, { cause: error });
   }
 
   let toolCount = 0;

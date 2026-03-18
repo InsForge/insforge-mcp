@@ -86,6 +86,27 @@ If you prefer to manually configure your MCP client, add this to your MCP settin
 
 For detailed setup instructions, see the [Insforge Documentation](https://docs.insforge.dev).
 
+## 🛠️ Development
+
+If you are contributing to this project or running it locally:
+
+```bash
+# Install dependencies
+npm install
+
+# Run unit tests
+npm run test
+
+# Run linter (static analysis)
+npm run lint
+
+# Auto-format code
+npm run format
+
+# Build the package
+npm run build
+```
+
 ## 📄 License
 
 Apache License 2.0 - see the [LICENSE](LICENSE) file for details.

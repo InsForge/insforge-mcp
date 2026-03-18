@@ -32,7 +32,7 @@ export function registerDocsTools(ctx: RegisterContext): void {
       throw new Error('Invalid response format from documentation endpoint');
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
-      throw new Error(`Unable to retrieve ${docType} documentation: ${errMsg}`);
+      throw new Error(`Unable to retrieve ${docType} documentation: ${errMsg}`, { cause: error });
     }
   };
 
@@ -61,7 +61,7 @@ export function registerDocsTools(ctx: RegisterContext): void {
       throw new Error('Invalid response format from documentation endpoint');
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : 'Unknown error occurred';
-      throw new Error(`Unable to retrieve ${feature}-${language} documentation: ${errMsg}`);
+      throw new Error(`Unable to retrieve ${feature}-${language} documentation: ${errMsg}`, { cause: error });
     }
   };
 
