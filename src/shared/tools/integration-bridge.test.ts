@@ -10,7 +10,7 @@ vi.mock('node-fetch', async () => {
         return {
           ok: true,
           status: 200,
-          json: async () => ({ status: 'ok', version: '1.5.0', service: 'insforge' }),
+          json: async () => ({ status: 'ok', version: '99.99.99', service: 'insforge' }),
         };
       }
       return actual.default(url, init);
@@ -90,6 +90,7 @@ describe('MCP Integrated Testing Bridge', () => {
       expect(result).toBeDefined();
       expect(result.content).toBeDefined();
       expect(Array.isArray(result.content)).toBe(true);
+      expect(result.isError).toBeFalsy();
     } catch (e) {
       console.error('Integration Execute fetch-docs failed:', e);
       throw e;
@@ -107,6 +108,7 @@ describe('MCP Integrated Testing Bridge', () => {
       const result = await tool.cb({});
       expect(result).toBeDefined();
       expect(result.content).toBeDefined();
+      expect(result.isError).toBeFalsy();
     } catch (e) {
       console.error('Integration Execute get-anon-key failed:', e);
       throw e;
