@@ -6,11 +6,10 @@
  *
  * Required environment variables (suite is skipped if missing):
  *
- *   INTEGRATION_TEST_ENABLED = "true"
- *   API_KEY                  — admin API key
- *   API_BASE_URL             — base URL of the live backend
- *   INTEGRATION_FUNCTION_SLUG — slug of a stable fixture edge function
- *   INTEGRATION_TABLE_NAME   — name of a stable fixture table
+ *   INTEGRATION_TEST_ENABLED  = "true"
+ *   INSFORGE_CLIENT_SECRET    — admin API key
+ *   INSFORGE_API_BASE         — base URL of the live backend
+ *   INTEGRATION_FUNCTION_SLUG — (Optional) slug of a stable fixture edge function
  *
  * Optional:
  *   INTEGRATION_LOG_SOURCE   — log source (default: "insforge.logs")
