@@ -45,7 +45,7 @@
   ],
   "dependencies": {
     "@insforge/shared-schemas": "1.1.43",
-    "@modelcontextprotocol/sdk": "^1.15.1",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "archiver": "^7.0.1",
     "commander": "^14.0.0",
     "dotenv": "^17.3.1",
@@ -55,6 +55,11 @@
     "mixpanel": "^0.18.1",
     "node-fetch": "^3.3.2",
     "zod": "^3.23.8"
+  },
+  "overrides": {
+    "glob": "^10.5.0",
+    "minimatch": "^9.0.7",
+    "rollup": "^4.59.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
