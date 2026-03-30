@@ -114,3 +114,8 @@ Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 ---
 
 Part of the [Insforge](https://github.com/InsForge/insforge) project.
+
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/insforge-insforge-mcp).
+
