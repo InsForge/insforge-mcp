@@ -79,6 +79,8 @@ export class SessionManager {
       apiKey: sessionData.apiKey,
       apiBaseUrl: sessionData.apiBaseUrl,
       mode: 'remote',
+      projectId: sessionData.projectId,
+      accessToken: sessionData.oauthTokenHash,
     });
 
     // Connect server to transport BEFORE persisting to Redis
@@ -196,6 +198,8 @@ export class SessionManager {
       apiKey: sessionData.apiKey,
       apiBaseUrl: sessionData.apiBaseUrl,
       mode: 'remote',
+      projectId: sessionData.projectId,
+      accessToken: sessionData.oauthTokenHash,
     });
 
     await server.connect(transport);
@@ -234,6 +238,8 @@ export class SessionManager {
       apiKey: sessionData.apiKey,
       apiBaseUrl: sessionData.apiBaseUrl,
       mode: 'remote',
+      projectId: sessionData.projectId,
+      accessToken: sessionData.oauthTokenHash,
     });
 
     // Connect server to SSE transport BEFORE persisting to Redis

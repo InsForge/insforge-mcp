@@ -16,6 +16,8 @@ export interface ToolsConfig {
   apiKey?: string;
   apiBaseUrl?: string;
   mode?: 'local' | 'remote';
+  projectId?: string;
+  accessToken?: string;
 }
 
 /**
@@ -154,7 +156,11 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
   const API_BASE_URL = config.apiBaseUrl || process.env.API_BASE_URL || 'http://localhost:7130';
   const isRemote = config.mode === 'remote';
 
-  const usageTracker = new UsageTracker(API_BASE_URL, GLOBAL_API_KEY);
+  const usageTracker = new UsageTracker(API_BASE_URL, GLOBAL_API_KEY, {
+    projectId: config.projectId,
+    accessToken: config.accessToken,
+    isRemote,
+  });
 
   let backendVersion: string;
   try {
