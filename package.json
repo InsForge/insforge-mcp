@@ -1,13 +1,14 @@
 {
   "name": "@insforge/mcp",
-  "version": "1.2.7",
+  "version": "1.2.8",
   "description": "MCP (Model Context Protocol) server for Insforge backend-as-a-service",
   "mcpName": "io.github.InsForge/insforge-mcp",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
+    "mcp": "./dist/index.js",
     "insforge-mcp": "./dist/index.js",
-    "insforge-mcp-server": "./dist/http/server.js"
+    "insforge-mcp-server": "./dist/http-server.js"
   },
   "scripts": {
     "dev:stdio": "tsx watch src/stdio/index.ts",
