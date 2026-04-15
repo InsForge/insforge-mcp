@@ -18,6 +18,7 @@ export type AddBackgroundContext = <T extends { content: Array<{ type: 'text'; t
 
 export interface RegisterContext {
   API_BASE_URL: string;
+  backendVersion: string;
   isRemote: boolean;
   registerTool: RegisterToolFn;
   withUsageTracking: WithUsageTracking;
