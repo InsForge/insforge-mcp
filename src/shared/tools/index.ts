@@ -131,14 +131,17 @@ async function fetchBackendVersion(apiBaseUrl: string): Promise<string> {
       throw new Error(`Health check failed with status ${response.status}`);
     }
 
-    const health = await response.json() as HealthCheckResponse;
+    const health = (await response.json()) as HealthCheckResponse;
     if (!health.version || typeof health.version !== 'string') {
       throw new Error('Health check returned invalid version field');
     }
     return health.version;
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`Health check timed out after 10s — is the backend running at ${apiBaseUrl}?`, { cause: error });
+      throw new Error(
+        `Health check timed out after 10s — is the backend running at ${apiBaseUrl}?`,
+        { cause: error }
+      );
     }
     throw error;
   } finally {
@@ -169,7 +172,9 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     console.error(`Failed to fetch backend version: ${msg}`);
-    throw new Error(`Cannot initialize tools: backend at ${API_BASE_URL} is unreachable. ${msg}`, { cause: error });
+    throw new Error(`Cannot initialize tools: backend at ${API_BASE_URL} is unreachable. ${msg}`, {
+      cause: error,
+    });
   }
 
   let toolCount = 0;
@@ -187,9 +192,10 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
       return true;
     } else {
       const req = TOOL_VERSION_REQUIREMENTS[toolName];
-      const reason = req?.minVersion && compareVersions(backendVersion, req.minVersion) < 0
-        ? `requires backend >= ${req.minVersion}`
-        : `deprecated after backend ${req?.maxVersion}`;
+      const reason =
+        req?.minVersion && compareVersions(backendVersion, req.minVersion) < 0
+          ? `requires backend >= ${req.minVersion}`
+          : `deprecated after backend ${req?.maxVersion}`;
       console.error(`Skipping tool '${toolName}': ${reason} (current: ${backendVersion})`);
       return false;
     }
@@ -265,6 +271,7 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
 
   const ctx: RegisterContext = {
     API_BASE_URL,
+    backendVersion,
     isRemote,
     registerTool,
     withUsageTracking,
