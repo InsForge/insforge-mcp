@@ -22,7 +22,7 @@ import type {
 import type { RegisterContext } from './types.js';
 import { shellEsc } from './utils.js';
 
-const DIRECT_DEPLOYMENT_MIN_VERSION = '2.0.4';
+const DIRECT_DEPLOYMENT_MIN_VERSION = '2.0.6';
 const DEFAULT_DIRECT_UPLOAD_CONCURRENCY = 8;
 const MAX_DIRECT_UPLOAD_CONCURRENCY = 32;
 const EXCLUDED_DEPLOYMENT_SEGMENTS = new Set([
