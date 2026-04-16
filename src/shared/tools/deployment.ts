@@ -47,6 +47,14 @@ class DirectDeploymentUnsupportedError extends Error {
   }
 }
 
+function isInsforgeCloudApiBaseUrl(apiBaseUrl: string): boolean {
+  try {
+    return new URL(apiBaseUrl).hostname.endsWith('.insforge.app');
+  } catch {
+    return false;
+  }
+}
+
 function isAbsoluteSourcePath(sourceDirectory: string): boolean {
   return sourceDirectory.startsWith('/') || /^[a-zA-Z]:[/\\]/.test(sourceDirectory);
 }
@@ -474,7 +482,7 @@ NODE
 
 After the script succeeds, call the \`start-deployment\` tool with the printed deployment ID.
 
-If the upload is interrupted after the deployment ID is printed, query \`system.deployment_files\` with the raw SQL tool for that \`deployment_id\` to inspect \`uploaded_at\`. You can rerun \`create-deployment\` to create a fresh deployment, or upload missing file IDs to \`PUT /api/deployments/:id/files/:fileId/content\` using the queried manifest rows.`;
+If the upload is interrupted after the deployment ID is printed, query \`deployments.files\` with the raw SQL tool for that \`deployment_id\` to inspect \`uploaded_at\`. You can rerun \`create-deployment\` to create a fresh deployment, or upload missing file IDs to \`PUT /api/deployments/:id/files/:fileId/content\` using the queried manifest rows.`;
 }
 
 export function registerDeploymentTools(ctx: RegisterContext): void {
@@ -679,7 +687,13 @@ Run each step in order. If any step fails, do not proceed to the next step.`;
                   type: 'text',
                   text:
                     formatSuccessMessage('Deployment started', startResult) +
-                    '\n\nNote: You can check deployment status by querying the system.deployments table.',
+                    `\n\n${
+                      supportsDirectDeployment
+                        ? isInsforgeCloudApiBaseUrl(API_BASE_URL)
+                          ? 'Note: You can check deployment status by querying the deployments.runs table.'
+                          : 'Note: For self-hosted direct deployments, check the result in your Vercel dashboard instead of InsForge deployment logs.'
+                        : 'Note: You can check deployment status by querying the deployments.runs table.'
+                    }`,
                 },
               ],
             });
@@ -766,7 +780,11 @@ Run each step in order. If any step fails, do not proceed to the next step.`;
                       type: 'text',
                       text:
                         formatSuccessMessage('Deployment started', startResult) +
-                        `\n\n${uploadSummary}\n\nNote: You can check deployment status by querying the system.deployments table. If file uploads are interrupted, inspect system.deployment_files with the raw SQL tool to see which files are already uploaded before retrying missing files.`,
+                        `\n\n${uploadSummary}\n\n${
+                          isInsforgeCloudApiBaseUrl(API_BASE_URL)
+                            ? 'Note: You can check deployment status by querying the deployments.runs table. If file uploads are interrupted, inspect deployments.files with the raw SQL tool to see which files are already uploaded before retrying missing files.'
+                            : 'Note: For self-hosted direct deployments, check the result in your Vercel dashboard instead of InsForge deployment logs. If file uploads are interrupted, inspect deployments.files with the raw SQL tool to see which files are already uploaded before retrying missing files.'
+                        }`,
                     },
                   ],
                 });
@@ -853,7 +871,7 @@ Run each step in order. If any step fails, do not proceed to the next step.`;
                   type: 'text',
                   text:
                     formatSuccessMessage('Deployment started', startResult) +
-                    '\n\nNote: You can check deployment status by querying the system.deployments table.',
+                    '\n\nNote: You can check deployment status by querying the deployments.runs table.',
                 },
               ],
             });
