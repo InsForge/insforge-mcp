@@ -83,6 +83,7 @@ describe('UsageTracker', () => {
       const body = JSON.parse(agentCall![1].body);
       expect(body.app_key).toBe('uhzx8md3');
       expect(body.project_id).toBeUndefined();
+      expect(body.client).toBe('mcp');
 
       // No Authorization header in local mode
       expect(agentCall![1].headers['Authorization']).toBeUndefined();
