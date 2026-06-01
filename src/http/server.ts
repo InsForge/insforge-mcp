@@ -1,6 +1,9 @@
 import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import { randomUUID, createHash } from 'crypto';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 
 // Transport imports
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -24,6 +27,39 @@ import {
 } from './config.js';
 import { renderProjectSelectionPage } from './templates/project-selection.js';
 import { getAnalyticsService, extractClientInfo } from './analytics.js';
+import { TOOL_CATALOG } from '../shared/tool-catalog.js';
+
+// ============================================================================
+// Server Card Discovery Document
+// ============================================================================
+
+/** Path used by the MCP server-card discovery document (ora / agent readiness). */
+const SERVER_CARD_ENDPOINT = '/.well-known/mcp/server-card.json';
+
+/** Human-readable server description (kept in sync with repo-root server.json). */
+const SERVER_DESCRIPTION =
+  'MCP server for InsForge BaaS — database, storage, edge functions, and deployments';
+
+/**
+ * Resolve this package's version without importing package.json directly
+ * (rootDir is ./src, so a static import would fall outside the compile root).
+ * Reads package.json at runtime relative to the bundled module, falling back to
+ * npm's injected env var and finally a constant so the card always has a value.
+ */
+function resolveServerVersion(): string {
+  try {
+    const moduleDir = dirname(fileURLToPath(import.meta.url));
+    // dist output and src both sit one level below the package root.
+    const pkgRaw = readFileSync(join(moduleDir, '..', 'package.json'), 'utf-8');
+    const version = (JSON.parse(pkgRaw) as { version?: string }).version;
+    if (version) return version;
+  } catch {
+    // Ignore and fall through to env / constant fallbacks.
+  }
+  return process.env.npm_package_version || '0.0.0';
+}
+
+const SERVER_VERSION = resolveServerVersion();
 
 // ============================================================================
 // Express App Setup
@@ -141,6 +177,20 @@ app.get(API_ENDPOINTS.health, async (_req: Request, res: Response) => {
     },
     sessions: stats,
     authentication: 'OAuth Bearer Token',
+  });
+});
+
+// MCP Server Card (ora / agent-readiness discovery document)
+// Served UNAUTHENTICATED: it is a static discovery document and must not require
+// OAuth or a backend connection. Exposes the five top-level fields ora's
+// `mcp-server-card` check expects (name, description, version, serverUrl, tools).
+app.get(SERVER_CARD_ENDPOINT, (_req: Request, res: Response) => {
+  res.json({
+    name: 'InsForge',
+    description: SERVER_DESCRIPTION,
+    version: SERVER_VERSION,
+    serverUrl: `${SERVER_CONFIG.publicUrl}${STREAMABLE_HTTP_ENDPOINTS.mcp}`,
+    tools: TOOL_CATALOG,
   });
 });
 
