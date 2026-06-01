@@ -91,6 +91,13 @@ export function registerDatabaseTools(ctx: RegisterContext): void {
       apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
       tableName: z.string().describe('Name of the table'),
     },
+    {
+      title: 'Get Table Schema',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     withUsageTracking('get-table-schema', async ({ apiKey, tableName }) => {
       try {
         const actualApiKey = getApiKey(apiKey);
@@ -118,6 +125,13 @@ export function registerDatabaseTools(ctx: RegisterContext): void {
     'Index all backend metadata',
     {
       apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
+    },
+    {
+      title: 'Get Backend Metadata',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
     },
     withUsageTracking('get-backend-metadata', async ({ apiKey }) => {
       try {
@@ -147,6 +161,13 @@ export function registerDatabaseTools(ctx: RegisterContext): void {
     {
       apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
       ...rawSQLRequestSchema.shape,
+    },
+    {
+      title: 'Run Raw SQL',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
     },
     withUsageTracking('run-raw-sql', async ({ apiKey, query, params }) => {
       try {
@@ -184,6 +205,13 @@ export function registerDatabaseTools(ctx: RegisterContext): void {
       {
         frame: z.enum(['react', 'nextjs']).describe('Framework to use for the template (support React and Next.js)'),
         projectName: z.string().optional().describe('Name for the project directory (optional, defaults to "insforge-{frame}")'),
+      },
+      {
+        title: 'Download Starter Template',
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
       },
       withUsageTracking('download-template', async ({ frame, projectName }) => {
         try {
@@ -237,6 +265,13 @@ After the command completes, \`cd ${shellEsc(targetDir)}\` and start developing.
       {
         frame: z.enum(['react', 'nextjs']).describe('Framework to use for the template (support React and Next.js)'),
         projectName: z.string().optional().describe('Name for the project directory (optional, defaults to "insforge-{frame}")'),
+      },
+      {
+        title: 'Download Starter Template',
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
       },
       withUsageTracking('download-template', async ({ frame, projectName }) => {
         try {
@@ -313,6 +348,13 @@ To: Your current project directory
       apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
       ...bulkUpsertRequestSchema.shape,
       filePath: z.string().describe('Path to CSV or JSON file containing data to import'),
+    },
+    {
+      title: 'Bulk Upsert Data',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
     },
     withUsageTracking('bulk-upsert', async ({ apiKey, table, filePath, upsertKey }) => {
       try {

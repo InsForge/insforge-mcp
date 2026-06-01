@@ -514,6 +514,13 @@ export function registerDeploymentTools(ctx: RegisterContext): void {
         .describe('Log source to retrieve'),
       limit: z.number().optional().default(20).describe('Number of logs to return (default: 20)'),
     },
+    {
+      title: 'Get Container Logs',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     withUsageTracking('get-container-logs', async ({ apiKey, source, limit }) => {
       try {
         const actualApiKey = getApiKey(apiKey);
@@ -564,6 +571,13 @@ export function registerDeploymentTools(ctx: RegisterContext): void {
           .describe(
             'Absolute path to the source directory containing files to deploy (e.g., /Users/name/project). Do not use relative paths like "."'
           ),
+      },
+      {
+        title: 'Create Deployment',
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
       },
       withUsageTracking('create-deployment', async ({ sourceDirectory }) => {
         try {
@@ -659,6 +673,13 @@ Run each step in order. If any step fails, do not proceed to the next step.`;
         deploymentId: z.string().describe('The deployment ID returned by create-deployment'),
         ...startDeploymentRequestSchema.shape,
       },
+      {
+        title: 'Start Deployment',
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
       withUsageTracking(
         'start-deployment',
         async ({ deploymentId, projectSettings, envVars, meta }) => {
@@ -719,6 +740,13 @@ Run each step in order. If any step fails, do not proceed to the next step.`;
             'Absolute path to the source directory containing files to deploy (e.g., /Users/name/project or C:\\Users\\name\\project). Do not use relative paths like "."'
           ),
         ...startDeploymentRequestSchema.shape,
+      },
+      {
+        title: 'Create Deployment',
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
       },
       withUsageTracking(
         'create-deployment',

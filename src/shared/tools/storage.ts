@@ -18,6 +18,13 @@ export function registerStorageTools(ctx: RegisterContext): void {
       apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
       ...createBucketRequestSchema.shape,
     },
+    {
+      title: 'Create Storage Bucket',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     withUsageTracking('create-bucket', async ({ apiKey, bucketName, isPublic }) => {
       try {
         const actualApiKey = getApiKey(apiKey);
@@ -50,6 +57,13 @@ export function registerStorageTools(ctx: RegisterContext): void {
     {
       apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
     },
+    {
+      title: 'List Storage Buckets',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     withUsageTracking('list-buckets', async ({ apiKey }) => {
       try {
         const response = await fetch(`${API_BASE_URL}/api/storage/buckets`, {
@@ -78,6 +92,13 @@ export function registerStorageTools(ctx: RegisterContext): void {
       apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
       // Reuse the same bucket name validation as create-bucket
       bucketName: createBucketRequestSchema.shape.bucketName,
+    },
+    {
+      title: 'Delete Storage Bucket',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
     },
     withUsageTracking('delete-bucket', async ({ apiKey, bucketName }) => {
       try {

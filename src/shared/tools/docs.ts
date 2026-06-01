@@ -73,6 +73,13 @@ export function registerDocsTools(ctx: RegisterContext): void {
     'fetch-docs',
     'Fetch Insforge documentation. Use "instructions" for essential backend setup (MANDATORY FIRST), or select specific SDK docs for database, auth, storage, functions, or AI integration.',
     { docType: docTypeSchema },
+    {
+      title: 'Fetch Documentation',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     withUsageTracking('fetch-docs', async ({ docType }) => {
       try {
         const content = await fetchDocumentation(docType);
@@ -104,6 +111,13 @@ export function registerDocsTools(ctx: RegisterContext): void {
 Supported features: ${sdkFeatureSchema.options.join(', ')}
 Supported languages: ${sdkLanguageSchema.options.join(', ')}`,
     { sdkFeature: sdkFeatureSchema, sdkLanguage: sdkLanguageSchema },
+    {
+      title: 'Fetch SDK Documentation',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     withUsageTracking('fetch-sdk-docs', async ({ sdkFeature, sdkLanguage }) => {
       try {
         const content = await fetchSDKDocumentation(sdkFeature, sdkLanguage);
@@ -133,6 +147,13 @@ Supported languages: ${sdkLanguageSchema.options.join(', ')}`,
     'Generate an anonymous JWT token that never expires. Requires admin API key. Use this for client-side applications that need public access.',
     {
       apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
+    },
+    {
+      title: 'Get Anonymous Key',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
     },
     withUsageTracking('get-anon-key', async ({ apiKey }) => {
       try {
