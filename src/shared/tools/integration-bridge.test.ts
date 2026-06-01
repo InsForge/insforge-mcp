@@ -26,29 +26,22 @@ describe('MCP Integrated Testing Bridge', () => {
   const mockServer = {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     tool: (name: string, ...args: any[]) => {
-      let description = '';
+      // The handler callback is always the final argument. Preceding args are
+      // any combination of description (string), input schema (object), and
+      // annotations (object), matching the SDK's `tool(...)` overloads.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let schema: any = {};
+      const cb: any = args[args.length - 1];
+      const rest = args.slice(0, -1);
+
+      const description = typeof rest[0] === 'string' ? (rest[0] as string) : '';
+      const objectArgs = rest.filter((arg) => typeof arg === 'object' && arg !== null);
+      // First object arg is the input schema; a second object arg (if any) is annotations.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let cb: any;
+      const schema: any = objectArgs[0] ?? {};
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const annotations: any = objectArgs[1];
 
-      if (args.length === 1) {
-        cb = args[0];
-      } else if (args.length === 2) {
-        if (typeof args[0] === 'string') {
-          description = args[0];
-          cb = args[1];
-        } else {
-          schema = args[0];
-          cb = args[1];
-        }
-      } else if (args.length >= 3) {
-        description = args[0];
-        schema = args[1];
-        cb = args[2];
-      }
-
-      registeredTools.set(name, { description, schema, cb });
+      registeredTools.set(name, { description, schema, annotations, cb });
       return mockServer;
     }
   };
@@ -73,6 +66,25 @@ describe('MCP Integrated Testing Bridge', () => {
   it('should register tools correctly', () => {
     expect(registeredTools.size).toBeGreaterThan(0);
     expect(registeredTools.has('fetch-docs')).toBe(true);
+  });
+
+  it('should attach MCP annotations to registered tools', () => {
+    // Read-only tool: should advertise readOnlyHint and a human-readable title.
+    const fetchDocs = registeredTools.get('fetch-docs');
+    expect(fetchDocs?.annotations).toBeDefined();
+    expect(fetchDocs.annotations.title).toBe('Fetch Documentation');
+    expect(fetchDocs.annotations.readOnlyHint).toBe(true);
+    expect(fetchDocs.annotations.destructiveHint).toBe(false);
+
+    // Destructive tool: run-raw-sql can run arbitrary SQL (incl. DROP).
+    const runRawSql = registeredTools.get('run-raw-sql');
+    expect(runRawSql?.annotations).toBeDefined();
+    expect(runRawSql.annotations.readOnlyHint).toBe(false);
+    expect(runRawSql.annotations.destructiveHint).toBe(true);
+
+    // The handler must still be the captured callback, not the annotations object.
+    expect(typeof fetchDocs.cb).toBe('function');
+    expect(typeof runRawSql.cb).toBe('function');
   });
 
   it('should execute fetch-docs tool for instructions if credentials setup', async () => {

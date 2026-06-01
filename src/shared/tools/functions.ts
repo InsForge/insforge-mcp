@@ -29,6 +29,13 @@ export function registerFunctionTools(ctx: RegisterContext): void {
           'The function code as a string. Must export: module.exports = async function(request) { return new Response(...) }'
         ),
       },
+      {
+        title: 'Create Edge Function',
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       withUsageTracking('create-function', async (args: any) => {
         try {
@@ -71,6 +78,13 @@ export function registerFunctionTools(ctx: RegisterContext): void {
         codeFile: z.string().describe(
           'Path to JavaScript file containing the function code. Must export: module.exports = async function(request) { return new Response(...) }'
         ),
+      },
+      {
+        title: 'Create Edge Function',
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
       },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       withUsageTracking('create-function', async (args: any) => {
@@ -122,6 +136,13 @@ export function registerFunctionTools(ctx: RegisterContext): void {
       apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
       slug: functionSchema.shape.slug.describe('The slug identifier of the function'),
     },
+    {
+      title: 'Get Edge Function',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     withUsageTracking('get-function', async (args: any) => {
       try {
@@ -156,6 +177,13 @@ export function registerFunctionTools(ctx: RegisterContext): void {
         code: z.string().optional().describe(
           'The new function code as a string. Must export: module.exports = async function(request) { return new Response(...) }'
         ),
+      },
+      {
+        title: 'Update Edge Function',
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
       },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       withUsageTracking('update-function', async (args: any) => {
@@ -200,6 +228,13 @@ export function registerFunctionTools(ctx: RegisterContext): void {
         codeFile: z.string().optional().describe(
           'Path to JavaScript file containing the new function code. Must export: module.exports = async function(request) { return new Response(...) }'
         ),
+      },
+      {
+        title: 'Update Edge Function',
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
       },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       withUsageTracking('update-function', async (args: any) => {
@@ -253,6 +288,13 @@ export function registerFunctionTools(ctx: RegisterContext): void {
     {
       apiKey: z.string().optional().describe('API key for authentication (optional if provided via --api_key)'),
       slug: functionSchema.shape.slug.describe('The slug identifier of the function to delete'),
+    },
+    {
+      title: 'Delete Edge Function',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     withUsageTracking('delete-function', async (args: any) => {
