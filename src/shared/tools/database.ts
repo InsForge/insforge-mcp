@@ -208,9 +208,9 @@ export function registerDatabaseTools(ctx: RegisterContext): void {
       },
       {
         title: 'Download Starter Template',
-        readOnlyHint: true,
+        readOnlyHint: false,
         destructiveHint: false,
-        idempotentHint: true,
+        idempotentHint: false,
         openWorldHint: true,
       },
       withUsageTracking('download-template', async ({ frame, projectName }) => {
@@ -268,9 +268,9 @@ After the command completes, \`cd ${shellEsc(targetDir)}\` and start developing.
       },
       {
         title: 'Download Starter Template',
-        readOnlyHint: true,
+        readOnlyHint: false,
         destructiveHint: false,
-        idempotentHint: true,
+        idempotentHint: false,
         openWorldHint: true,
       },
       withUsageTracking('download-template', async ({ frame, projectName }) => {
