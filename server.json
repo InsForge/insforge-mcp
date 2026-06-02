@@ -3,6 +3,13 @@
   "name": "io.github.InsForge/insforge-mcp",
   "title": "InsForge",
   "description": "MCP server for InsForge BaaS — database, storage, edge functions, and deployments",
+  "websiteUrl": "https://insforge.dev",
+  "icons": [
+    {
+      "src": "https://github.com/InsForge.png",
+      "mimeType": "image/png"
+    }
+  ],
   "repository": {
     "url": "https://github.com/InsForge/insforge-mcp",
     "source": "github"
