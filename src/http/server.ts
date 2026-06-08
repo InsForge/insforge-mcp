@@ -24,6 +24,7 @@ import {
 } from './config.js';
 import { renderProjectSelectionPage } from './templates/project-selection.js';
 import { getAnalyticsService, extractClientInfo } from './analytics.js';
+import { PACKAGE_VERSION } from '../shared/version.js';
 
 // ============================================================================
 // Express App Setup
@@ -134,7 +135,7 @@ app.get(API_ENDPOINTS.health, async (_req: Request, res: Response) => {
   res.json({
     status: 'ok',
     server: 'insforge-mcp',
-    version: '1.0.0',
+    version: PACKAGE_VERSION,
     protocols: {
       streamableHttp: '2025-03-26',
       sse: '2024-11-05 (deprecated)',

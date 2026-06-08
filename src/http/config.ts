@@ -1,11 +1,15 @@
 import 'dotenv/config';
 import { program } from 'commander';
+import { PACKAGE_VERSION } from '../shared/version.js';
 
 // ============================================================================
 // Command Line Arguments
 // ============================================================================
 
 program
+  .name('insforge-mcp-server')
+  .description('HTTP MCP server for Insforge backend-as-a-service')
+  .version(PACKAGE_VERSION, '-v, --version')
   .option('--port <number>', 'Port to run HTTP server on', '3000')
   .option('--host <string>', 'Host to bind to', '127.0.0.1');
 program.parse(process.argv);
