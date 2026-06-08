@@ -9,6 +9,10 @@ function loadPackageJson(): { version?: string } {
   try {
     return require('../../package.json') as { version?: string };
   } catch {
-    return require('../package.json') as { version?: string };
+    try {
+      return require('../package.json') as { version?: string };
+    } catch {
+      return { version: '0.0.0' };
+    }
   }
 }
