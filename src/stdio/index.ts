@@ -1,11 +1,16 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { program } from 'commander';
+import { PACKAGE_VERSION } from '../shared/version.js';
 import { registerInsforgeTools } from '../shared/tools/index.js';
 
 // Parse command line arguments
-program.option('--api_key <value>', 'API Key');
-program.option('--api_base_url <value>', 'API Base URL');
+program
+  .name('insforge-mcp')
+  .description('MCP server for Insforge backend-as-a-service')
+  .version(PACKAGE_VERSION, '-v, --version')
+  .option('--api_key <value>', 'API Key')
+  .option('--api_base_url <value>', 'API Base URL');
 program.parse(process.argv);
 const options = program.opts();
 const { api_key, api_base_url } = options;
@@ -15,7 +20,7 @@ async function main() {
   // Create MCP server
   const server = new McpServer({
     name: 'insforge-mcp',
-    version: '1.0.0',
+    version: PACKAGE_VERSION,
   });
 
   // Register all Insforge tools with the server (async to support dynamic version-based registration)

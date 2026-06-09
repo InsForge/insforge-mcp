@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { getRedisClient } from './redis.js';
 import { registerInsforgeTools } from '../shared/tools/index.js';
+import { PACKAGE_VERSION } from '../shared/version.js';
 
 /**
  * Session data stored in Redis
@@ -72,7 +73,7 @@ export class SessionManager {
     // Create MCP server and register tools first
     const server = new McpServer({
       name: 'insforge-mcp',
-      version: '1.0.0',
+      version: PACKAGE_VERSION,
     });
 
     const toolsConfig = await registerInsforgeTools(server, {
@@ -191,7 +192,7 @@ export class SessionManager {
     // Create new MCP server with stored configuration
     const server = new McpServer({
       name: 'insforge-mcp',
-      version: '1.0.0',
+      version: PACKAGE_VERSION,
     });
 
     await registerInsforgeTools(server, {
@@ -231,7 +232,7 @@ export class SessionManager {
     // Create MCP server and register tools first
     const server = new McpServer({
       name: 'insforge-mcp',
-      version: '1.0.0',
+      version: PACKAGE_VERSION,
     });
 
     const toolsConfig = await registerInsforgeTools(server, {
