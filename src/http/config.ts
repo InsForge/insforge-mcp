@@ -76,23 +76,11 @@ export const OAUTH_CONFIG = {
 // ============================================================================
 // Redis Configuration
 // ============================================================================
-
-export const REDIS_CONFIG = {
-  /** Redis host */
-  host: process.env.REDIS_HOST || 'localhost',
-
-  /** Redis port */
-  port: parseInt(process.env.REDIS_PORT || '6379'),
-
-  /** Redis password */
-  password: process.env.REDIS_PASSWORD || undefined,
-
-  /** Use TLS for Redis connection */
-  tls: process.env.REDIS_TLS === 'true',
-
-  /** Use Redis cluster mode */
-  cluster: process.env.REDIS_CLUSTER === 'true',
-} as const;
+//
+// Deliberately not here. Redis config is read in redis.ts, next to the client
+// it configures. A second copy lived here, unimported, and it advertised a
+// REDIS_PASSWORD that the real client never sent — so a password-protected
+// Redis failed to connect with the variable sitting there looking correct.
 
 // ============================================================================
 // Session Configuration
