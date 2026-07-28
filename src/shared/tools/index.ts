@@ -1,4 +1,3 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import fetch from 'node-fetch';
 import { handleApiResponse } from '../response-handler.js';
 import { UsageTracker } from '../usage-tracker.js';
@@ -8,7 +7,7 @@ import { registerStorageTools } from './storage.js';
 import { registerFunctionTools } from './functions.js';
 import { registerDeploymentTools } from './deployment.js';
 import type { RegisterContext } from './types.js';
-import { asToolHost, type ToolHost } from './host.js';
+import type { ToolHost } from './host.js';
 
 /**
  * Configuration for the tools
@@ -156,14 +155,10 @@ async function fetchBackendVersion(apiBaseUrl: string): Promise<string> {
  * sets up the shared context and delegates to each domain registrar.
  *
  * Takes a ToolHost rather than a server directly, so the tool layer stays
- * independent of which server implementation is underneath. An SDK server is
- * still accepted and wrapped.
+ * independent of which server implementation is underneath. Wrap an SDK
+ * server with sdkToolHost().
  */
-export async function registerInsforgeTools(
-  target: McpServer | ToolHost,
-  config: ToolsConfig = {}
-) {
-  const host = asToolHost(target);
+export async function registerInsforgeTools(host: ToolHost, config: ToolsConfig = {}) {
   const GLOBAL_API_KEY = config.apiKey || process.env.API_KEY || '';
   const API_BASE_URL = config.apiBaseUrl || process.env.API_BASE_URL || 'http://localhost:7130';
   const isRemote = config.mode === 'remote';

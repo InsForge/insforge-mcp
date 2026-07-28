@@ -38,13 +38,3 @@ export function sdkToolHost(server: McpServer): ToolHost {
   };
 }
 
-/**
- * Accept either a host or a bare SDK server, so callers that still pass a
- * server keep working. Anything exposing `registerTool` is taken as a host.
- */
-export function asToolHost(target: McpServer | ToolHost): ToolHost {
-  if (typeof (target as ToolHost).registerTool === 'function') {
-    return target as ToolHost;
-  }
-  return sdkToolHost(target as McpServer);
-}

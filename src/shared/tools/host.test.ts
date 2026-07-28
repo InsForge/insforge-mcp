@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { asToolHost, sdkToolHost, type ToolHost } from './host.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { z } from 'zod';
+import { sdkToolHost, type ToolHost } from './host.js';
 import { registerInsforgeTools } from './index.js';
 
 // registerInsforgeTools refuses to start unless it can read the backend version,
@@ -45,32 +49,35 @@ function recordingHost() {
 }
 
 describe('sdkToolHost', () => {
-  it('forwards the four arguments positionally to server.tool', () => {
-    const tool = vi.fn();
-    const handler = async () => ({ content: [] });
-    const schema = { thing: {} };
+  // Against a real McpServer, not a hand-shaped stub: a stub can agree with an
+  // assumption the SDK doesn't hold, which is exactly how the earlier
+  // duck-typed asToolHost() passed its tests while being broken.
+  it('registers a tool that a client can list and call', async () => {
+    const server = new McpServer({ name: 'test', version: '1.0.0' });
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    sdkToolHost({ tool } as any).registerTool('a-tool', 'does a thing', schema, handler);
+    sdkToolHost(server).registerTool(
+      'echo-tool',
+      'echoes what it is given',
+      { phrase: z.string().describe('what to echo') },
+      async ({ phrase }: { phrase: string }) => ({
+        content: [{ type: 'text' as const, text: `echo: ${phrase}` }],
+      })
+    );
 
-    expect(tool).toHaveBeenCalledWith('a-tool', 'does a thing', schema, handler);
-  });
-});
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test-client', version: '1.0.0' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
-describe('asToolHost', () => {
-  it('passes a host through untouched', () => {
-    const { host } = recordingHost();
-    expect(asToolHost(host)).toBe(host);
-  });
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).toEqual(['echo-tool']);
+    expect(tools[0].description).toBe('echoes what it is given');
+    expect(tools[0].inputSchema.properties).toHaveProperty('phrase');
 
-  it('wraps a bare SDK server', () => {
-    const tool = vi.fn();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const host = asToolHost({ tool } as any);
+    const result = await client.callTool({ name: 'echo-tool', arguments: { phrase: 'hi' } });
+    expect(result.content).toEqual([{ type: 'text', text: 'echo: hi' }]);
 
-    expect(host).not.toHaveProperty('tool');
-    host.registerTool('a-tool', 'does a thing', {}, async () => ({ content: [] }));
-    expect(tool).toHaveBeenCalledOnce();
+    await client.close();
+    await server.close();
   });
 });
 
@@ -100,6 +107,31 @@ describe('registerInsforgeTools through a ToolHost', () => {
     // download-template, create-function, update-function) must resolve to one.
     const names = calls.map((c) => c.name);
     expect(new Set(names).size).toBe(names.length);
+  });
+
+  it('registers the full surface onto a real SDK server', async () => {
+    backendVersion = '99.99.99';
+    const server = new McpServer({ name: 'insforge-mcp', version: 'test' });
+
+    const result = await registerInsforgeTools(sdkToolHost(server), {
+      apiKey: 'test-key',
+      apiBaseUrl: 'http://localhost:7130',
+    });
+
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test-client', version: '1.0.0' });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const { tools } = await client.listTools();
+    expect(tools.length).toBe(result.toolCount);
+    expect(tools.map((t) => t.name)).toContain('fetch-docs');
+    for (const tool of tools) {
+      expect(tool.description?.length).toBeGreaterThan(0);
+      expect(tool.inputSchema.type).toBe('object');
+    }
+
+    await client.close();
+    await server.close();
   });
 
   it('still applies backend-version gating at the seam', async () => {

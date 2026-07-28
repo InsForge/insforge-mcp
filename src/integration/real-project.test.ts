@@ -18,6 +18,7 @@
 import 'dotenv/config';
 import { describe, it, expect, beforeAll } from 'vitest';
 import { registerInsforgeTools } from '../shared/tools/index.js';
+import { sdkToolHost } from '../shared/tools/host.js';
 import {
   createMockServer,
   getRequiredEnv,
@@ -58,7 +59,7 @@ describe.skipIf(!integrationEnabled)('Real Project Integration Tests (Phase 1)',
     const { server, tools: registeredTools } = createMockServer();
 
     // Register tools — NO try/catch: a failure here must crash the suite
-    await registerInsforgeTools(server, {
+    await registerInsforgeTools(sdkToolHost(server), {
       apiKey: API_KEY,
       apiBaseUrl: API_BASE_URL,
       mode: 'local',
