@@ -126,6 +126,26 @@ check(
   `resource=${originDoc.body?.resource}`
 );
 
+// --- can it actually start a login? ---------------------------------------
+// validateConfig() only warns when INSFORGE_CLIENT_ID/SECRET are missing, so a
+// server with no OAuth credentials starts, passes health checks and serves every
+// discovery document above — and then cannot log anyone in. /oauth/authorize
+// checks its credentials before it validates parameters, so a bare request
+// separates the two without needing a registered client:
+//   500 server_error  -> credentials missing
+//   400 invalid_request -> configured, just called without parameters
+const authorize = await getJson('/oauth/authorize');
+check(
+  'OAuth credentials are configured',
+  authorize.status !== 500,
+  authorize.body?.error_description || `status ${authorize.status}`
+);
+check(
+  'the authorize endpoint is reachable and validating',
+  authorize.status === 400 || authorize.status === 302,
+  `status ${authorize.status}`
+);
+
 // --- follow the chain to whichever AS the resource names ------------------
 // This is the client's next hop, so it gets checked whether the AS is us or the
 // platform. RFC 8414 §3.1 derives the URL the same way RFC 9728 does — insert
