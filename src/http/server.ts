@@ -24,6 +24,7 @@ import {
 } from './config.js';
 import { renderProjectSelectionPage } from './templates/project-selection.js';
 import { getAnalyticsService, extractClientInfo } from './analytics.js';
+import { sendUnauthorized } from './auth-challenge.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
 
 // ============================================================================
@@ -759,7 +760,7 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
 
     if (!projectInfo) {
       if (!legacyApiKey && !oauthToken) {
-        return res.status(401).json({
+        return sendUnauthorized(res, {
           error: 'authentication_required',
           error_description: 'Missing authentication. Provide Authorization: Bearer <OAUTH_TOKEN> or X-Api-Key header.',
           oauth_authorize_url: `${SERVER_CONFIG.publicUrl}${OAUTH_ENDPOINTS.authorize}`,
@@ -767,7 +768,7 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
       }
 
       if (oauthToken && !legacyApiBaseUrl) {
-        return res.status(401).json({
+        return sendUnauthorized(res, {
           error: 'project_binding_required',
           error_description: 'OAuth token is valid but not bound to a project. Complete the OAuth flow or call POST /api/projects/{projectId}/bind',
           oauth_authorize_url: `${SERVER_CONFIG.publicUrl}${OAUTH_ENDPOINTS.authorize}`,
@@ -790,7 +791,7 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
       // If we only have oauthToken without legacyApiKey, reject the request
       // because OAuth tokens are not interchangeable with API keys
       if (!legacyApiKey) {
-        return res.status(401).json({
+        return sendUnauthorized(res, {
           error: 'invalid_credentials',
           error_description: 'Legacy authentication requires X-Api-Key header. OAuth tokens cannot be used as API keys.',
         });
@@ -939,14 +940,14 @@ app.get(SSE_ENDPOINTS.sse, async (req: Request, res: Response) => {
 
   if (!projectInfo) {
     if (!legacyApiKey && !oauthToken) {
-      return res.status(401).json({
+      return sendUnauthorized(res, {
         error: 'authentication_required',
         error_description: 'Missing authentication. Provide Authorization: Bearer <OAUTH_TOKEN> or X-Api-Key header.',
       });
     }
 
     if (oauthToken && !legacyApiBaseUrl) {
-      return res.status(401).json({
+      return sendUnauthorized(res, {
         error: 'project_binding_required',
         error_description: 'OAuth token is valid but not bound to a project. Complete the OAuth flow.',
       });
