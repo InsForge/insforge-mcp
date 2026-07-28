@@ -16,6 +16,8 @@ import {
   OAUTH_CONFIG,
   STREAMABLE_HTTP_ENDPOINTS,
   SSE_ENDPOINTS,
+  SSE_KEEPALIVE_MS,
+  SESSION_SWEEP_MS,
   OAUTH_ENDPOINTS,
   API_ENDPOINTS,
   isOAuthConfigured,
@@ -978,9 +980,24 @@ app.get(SSE_ENDPOINTS.sse, async (req: Request, res: Response) => {
 
   console.log(`[SSE] Session created: ${transport.sessionId}, Project: ${validProjectInfo.projectName}`);
 
+  // An idle SSE stream carries no bytes, so the load balancer closes it on its
+  // idle timeout and the client sees the connection drop. A comment frame is
+  // ignored by the event-stream parser and by the transport's own framing, so
+  // it keeps the connection warm without being visible to the client.
+  const keepAlive = setInterval(() => {
+    if (res.writableEnded) return;
+    try {
+      res.write(': keepalive\n\n');
+    } catch (error) {
+      console.error(`[SSE] Keepalive write failed for ${transport.sessionId}:`, error);
+    }
+  }, SSE_KEEPALIVE_MS);
+  keepAlive.unref();
+
   // Clean up on close
   res.on('close', () => {
     console.log(`[SSE] Session closed: ${transport.sessionId}`);
+    clearInterval(keepAlive);
     sseTransports.delete(transport.sessionId);
 
     // Clean up the session from SessionManager (async with error handling)
@@ -1083,6 +1100,10 @@ async function startServer() {
     await redis.ping();
     console.log('[Redis] Connection verified');
 
+    // Runtime sessions are only dropped on an explicit DELETE, which Streamable
+    // HTTP clients rarely send. Reap the ones Redis has already expired.
+    getSessionManager().startIdleSweep(SESSION_SWEEP_MS);
+
     const server = app.listen(SERVER_CONFIG.port, SERVER_CONFIG.host, () => {
       const redisConfig = getRedisConfig();
       console.log(`
@@ -1166,6 +1187,7 @@ async function startServer() {
         // Close all MCP sessions
         try {
           const sessionManager = getSessionManager();
+          sessionManager.stopIdleSweep();
           await sessionManager.closeAllSessions();
         } catch (error) {
           console.error('[Shutdown] Error closing sessions:', error);

@@ -98,6 +98,19 @@ export const REDIS_CONFIG = {
 // Session Configuration
 // ============================================================================
 
+/**
+ * How often to write a comment frame on an idle SSE stream. Must stay well
+ * under the load balancer's idle timeout (60s by default on an AWS ALB) or the
+ * stream is closed underneath a connected client.
+ */
+export const SSE_KEEPALIVE_MS = parseInt(process.env.MCP_SSE_KEEPALIVE_MS || '') || 25 * 1000;
+
+/**
+ * How often to reap runtime sessions whose Redis record has expired.
+ * Overridable so the reaper can be exercised without waiting minutes.
+ */
+export const SESSION_SWEEP_MS = parseInt(process.env.MCP_SESSION_SWEEP_MS || '') || 5 * 60 * 1000;
+
 export const SESSION_CONFIG = {
   /** Session TTL in seconds (24 hours) */
   ttl: 24 * 60 * 60,

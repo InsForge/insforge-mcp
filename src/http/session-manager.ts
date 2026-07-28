@@ -45,6 +45,25 @@ const SESSION_KEY_PREFIX = 'mcp:session:';
 // Session TTL in seconds (24 hours)
 const SESSION_TTL = 24 * 60 * 60;
 
+// How often to reap runtime sessions whose Redis record is gone (5 minutes)
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * Pick the runtime sessions that no longer have a Redis record.
+ *
+ * Redis owns session lifetime — the record expires on SESSION_TTL — but the
+ * in-memory McpServer and transport are only dropped on an explicit DELETE.
+ * Streamable HTTP clients mostly never send one, so anything whose record has
+ * gone is an orphan holding a server, a transport and a full tool registry.
+ *
+ * `exists` is the pipelined EXISTS reply for the matching id. A missing or
+ * failed reply counts as alive: a transient Redis error must never be read as
+ * "reap this live session".
+ */
+export function selectOrphanedSessions(sessionIds: string[], exists: number[]): string[] {
+  return sessionIds.filter((_, i) => exists[i] === 0);
+}
+
 /**
  * SessionManager handles MCP session lifecycle with Redis persistence
  *
@@ -55,6 +74,9 @@ const SESSION_TTL = 24 * 60 * 60;
 export class SessionManager {
   // In-memory cache for runtime instances
   private runtimeSessions = new Map<string, RuntimeSession>();
+
+  // Periodic reaper for runtime sessions Redis has already expired
+  private sweepTimer?: NodeJS.Timeout;
 
   /**
    * Create a new session
@@ -309,6 +331,70 @@ export class SessionManager {
     await redis.del(SESSION_KEY_PREFIX + sessionId);
 
     console.log(`[SessionManager] Session deleted: ${sessionId}`);
+  }
+
+  /**
+   * Drop runtime sessions whose Redis record has gone, closing each one.
+   * Returns how many were reaped.
+   */
+  async sweepOrphanedSessions(): Promise<number> {
+    const sessionIds = Array.from(this.runtimeSessions.keys());
+    if (sessionIds.length === 0) {
+      return 0;
+    }
+
+    const redis = getRedisClient();
+    const pipeline = redis.pipeline();
+    for (const sessionId of sessionIds) {
+      pipeline.exists(SESSION_KEY_PREFIX + sessionId);
+    }
+    const replies = await pipeline.exec();
+
+    // A failed or absent reply is treated as "still alive" so a Redis blip
+    // can't take out live sessions.
+    const exists = sessionIds.map((_, i) => {
+      const reply = replies?.[i];
+      if (!reply || reply[0]) return 1;
+      return Number(reply[1]);
+    });
+
+    const orphaned = selectOrphanedSessions(sessionIds, exists);
+    for (const sessionId of orphaned) {
+      await this.deleteSession(sessionId);
+    }
+
+    if (orphaned.length > 0) {
+      console.log(
+        `[SessionManager] Swept ${orphaned.length} orphaned session(s); ${this.runtimeSessions.size} remain in memory`
+      );
+    }
+    return orphaned.length;
+  }
+
+  /**
+   * Start the periodic sweep. Idempotent; the timer is unref'd so it never
+   * holds the process open on shutdown.
+   */
+  startIdleSweep(intervalMs: number = SWEEP_INTERVAL_MS): void {
+    if (this.sweepTimer) {
+      return;
+    }
+    this.sweepTimer = setInterval(() => {
+      this.sweepOrphanedSessions().catch((error) => {
+        console.error('[SessionManager] Sweep failed:', error);
+      });
+    }, intervalMs);
+    this.sweepTimer.unref();
+  }
+
+  /**
+   * Stop the periodic sweep.
+   */
+  stopIdleSweep(): void {
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = undefined;
+    }
   }
 
   /**
