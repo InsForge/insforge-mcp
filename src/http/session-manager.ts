@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { getRedisClient } from './redis.js';
+import { SESSION_SWEEP_MS } from './config.js';
 import { registerInsforgeTools } from '../shared/tools/index.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
 
@@ -44,9 +45,6 @@ const SESSION_KEY_PREFIX = 'mcp:session:';
 
 // Session TTL in seconds (24 hours)
 const SESSION_TTL = 24 * 60 * 60;
-
-// How often to reap runtime sessions whose Redis record is gone (5 minutes)
-const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 
 /**
  * Pick the runtime sessions that no longer have a Redis record.
@@ -338,7 +336,15 @@ export class SessionManager {
    * Returns how many were reaped.
    */
   async sweepOrphanedSessions(): Promise<number> {
-    const sessionIds = Array.from(this.runtimeSessions.keys());
+    // Streamable HTTP only. SSE has a real disconnect signal and cleans itself
+    // up on res 'close' — that asymmetry is the whole reason this reaper exists.
+    // Sweeping SSE too would close live connections: nothing on the SSE message
+    // path refreshes the record, so it lapses at SESSION_TTL from creation
+    // whether or not the client is active, and the keepalive means such a
+    // connection is still open when it does.
+    const sessionIds = Array.from(this.runtimeSessions.entries())
+      .filter(([, session]) => session.transportType === 'streamable')
+      .map(([sessionId]) => sessionId);
     if (sessionIds.length === 0) {
       return 0;
     }
@@ -375,7 +381,7 @@ export class SessionManager {
    * Start the periodic sweep. Idempotent; the timer is unref'd so it never
    * holds the process open on shutdown.
    */
-  startIdleSweep(intervalMs: number = SWEEP_INTERVAL_MS): void {
+  startIdleSweep(intervalMs: number = SESSION_SWEEP_MS): void {
     if (this.sweepTimer) {
       return;
     }

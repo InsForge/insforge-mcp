@@ -14,19 +14,19 @@ vi.mock('./redis.js', () => ({
 const { SessionManager, selectOrphanedSessions } = await import('./session-manager.js');
 
 /** Stand-in for a runtime entry; only close() is exercised by the sweep. */
-function fakeRuntime() {
+function fakeRuntime(transportType: 'streamable' | 'sse' = 'streamable') {
   return {
     server: { close: vi.fn().mockResolvedValue(undefined) },
     transport: { close: vi.fn().mockResolvedValue(undefined) },
-    transportType: 'streamable' as const,
+    transportType,
   };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function seed(manager: any, ids: string[]) {
+function seed(manager: any, ids: string[], transportType: 'streamable' | 'sse' = 'streamable') {
   const runtimes = new Map<string, ReturnType<typeof fakeRuntime>>();
   for (const id of ids) {
-    const rt = fakeRuntime();
+    const rt = fakeRuntime(transportType);
     runtimes.set(id, rt);
     manager.runtimeSessions.set(id, rt);
   }
@@ -97,6 +97,38 @@ describe('SessionManager.sweepOrphanedSessions', () => {
 
     await expect(manager.sweepOrphanedSessions()).resolves.toBe(0);
     expect(manager.getActiveSessionIds()).toEqual(['a']);
+  });
+
+  it('never reaps an SSE session, even with no Redis record', async () => {
+    // SSE cleans up on res 'close' and nothing on its message path used to
+    // refresh the record, so an SSE record lapses at TTL from creation while
+    // the connection is still open and keepalive-warm. Sweeping it would drop
+    // a live client.
+    const manager = new SessionManager();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const sse = seed(manager as any, ['sse-live'], 'sse');
+    pipelineExec.mockResolvedValue([[null, 0]]);
+
+    await expect(manager.sweepOrphanedSessions()).resolves.toBe(0);
+    expect(manager.getActiveSessionIds()).toContain('sse-live');
+    expect(sse.get('sse-live')!.transport.close).not.toHaveBeenCalled();
+    // Nothing to ask Redis about, so no pipeline should have run at all.
+    expect(pipelineExec).not.toHaveBeenCalled();
+  });
+
+  it('reaps an expired streamable session while leaving an SSE one alone', async () => {
+    const manager = new SessionManager();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const streamable = seed(manager as any, ['http-dead'], 'streamable');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const sse = seed(manager as any, ['sse-live'], 'sse');
+    // Only the streamable id is queried, so a single reply is correct.
+    pipelineExec.mockResolvedValue([[null, 0]]);
+
+    await expect(manager.sweepOrphanedSessions()).resolves.toBe(1);
+    expect(manager.getActiveSessionIds()).toEqual(['sse-live']);
+    expect(streamable.get('http-dead')!.transport.close).toHaveBeenCalled();
+    expect(sse.get('sse-live')!.transport.close).not.toHaveBeenCalled();
   });
 
   it('reclaims an accumulation of orphans in one pass', async () => {

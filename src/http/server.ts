@@ -1083,6 +1083,16 @@ app.post(SSE_ENDPOINTS.messages, async (req: Request, res: Response) => {
     });
   }
 
+  // Streamable HTTP refreshes the Redis record on every request; the SSE path
+  // did not, so an SSE record lapsed 24h after creation however active the
+  // client was, and /health under-reported live SSE sessions. Fire-and-forget:
+  // a failed refresh must not fail the message.
+  getSessionManager()
+    .touchSession(sessionId)
+    .catch((error) => {
+      console.error(`[SSE] Failed to refresh session ${sessionId}:`, error);
+    });
+
   await transport.handlePostMessage(req, res, req.body);
 });
 
