@@ -8,6 +8,7 @@ import { registerStorageTools } from './storage.js';
 import { registerFunctionTools } from './functions.js';
 import { registerDeploymentTools } from './deployment.js';
 import type { RegisterContext } from './types.js';
+import { asToolHost, type ToolHost } from './host.js';
 
 /**
  * Configuration for the tools
@@ -153,8 +154,16 @@ async function fetchBackendVersion(apiBaseUrl: string): Promise<string> {
  * Register all Insforge tools on an MCP server.
  * Tools are split by domain into separate modules; this function
  * sets up the shared context and delegates to each domain registrar.
+ *
+ * Takes a ToolHost rather than a server directly, so the tool layer stays
+ * independent of which server implementation is underneath. An SDK server is
+ * still accepted and wrapped.
  */
-export async function registerInsforgeTools(server: McpServer, config: ToolsConfig = {}) {
+export async function registerInsforgeTools(
+  target: McpServer | ToolHost,
+  config: ToolsConfig = {}
+) {
+  const host = asToolHost(target);
   const GLOBAL_API_KEY = config.apiKey || process.env.API_KEY || '';
   const API_BASE_URL = config.apiBaseUrl || process.env.API_BASE_URL || 'http://localhost:7130';
   const isRemote = config.mode === 'remote';
@@ -186,8 +195,8 @@ export async function registerInsforgeTools(server: McpServer, config: ToolsConf
       return false;
     }
     if (shouldRegisterTool(toolName, backendVersion)) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (server.tool as any)(toolName, ...args);
+      const [description, inputSchema, handler] = args;
+      host.registerTool(toolName, description, inputSchema, handler);
       toolCount++;
       return true;
     } else {
