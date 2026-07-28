@@ -1,0 +1,47 @@
+name: Verify Deployed Discovery
+
+# Standing check on the deployed server's OAuth discovery chain, not just a
+# one-off deploy gate. Every implementation reviewed while writing this — ours,
+# the framework's, and the platform's — had the metadata URL and identifier
+# rules of RFC 9728 §3.1/§3.3 wrong in some direction, and nothing in CI would
+# have noticed. A drifted deployment is exactly the failure this catches.
+#
+# The script is read-only: it fetches discovery documents and makes one
+# unauthenticated MCP request. It registers no client and needs no secret.
+#
+# Expect this to be RED until mcp.insforge.dev is deployed current — that is
+# the true state of production, not a broken workflow.
+
+on:
+  schedule:
+    # Daily, off the hour to avoid the scheduling stampede.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Base URL of the deployed server'
+        required: false
+        default: 'https://mcp.insforge.dev'
+      expected_version:
+        description: 'Version /health must report (optional)'
+        required: false
+        default: ''
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Verify deployed discovery
+        run: |
+          node scripts/verify-deploy.mjs \
+            "${{ github.event.inputs.url || 'https://mcp.insforge.dev' }}" \
+            ${{ github.event.inputs.expected_version }}

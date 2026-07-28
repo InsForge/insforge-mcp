@@ -126,22 +126,42 @@ check(
   `resource=${originDoc.body?.resource}`
 );
 
-// --- the authorization server is still advertised -------------------------
-// Only when this server IS its own authorization server. A pure resource server
-// delegates to an external AS and has no business serving this document — which
-// is the shape insforge-mcp takes on if project selection ever moves into the
-// platform AS, so don't hard-code the assumption.
-const selfHosted = originDoc.body?.authorization_servers?.includes(base);
-if (selfHosted) {
-  const as = await getJson('/.well-known/oauth-authorization-server');
-  check('AS metadata is 200', as.status === 200, `status ${as.status}`);
-  for (const field of ['authorization_endpoint', 'token_endpoint', 'registration_endpoint']) {
-    check(`AS metadata advertises ${field}`, !!as.body?.[field], String(as.body?.[field]));
+// --- follow the chain to whichever AS the resource names ------------------
+// This is the client's next hop, so it gets checked whether the AS is us or the
+// platform. RFC 8414 §3.1 derives the URL the same way RFC 9728 does — insert
+// the well-known segment between host and path — and §3.3 requires `issuer` to
+// equal the identifier it was derived from.
+//
+// Worth checking rather than assuming: every implementation looked at while
+// writing this got that rule wrong in one direction or another.
+function asMetadataUrl(issuer) {
+  const u = new URL(issuer);
+  const path = u.pathname.replace(/\/$/, '');
+  return `${u.origin}/.well-known/oauth-authorization-server${path}`;
+}
+
+const authServers = originDoc.body?.authorization_servers ?? [];
+check('the resource names at least one authorization server', authServers.length > 0, JSON.stringify(authServers));
+
+for (const issuer of authServers) {
+  const url = asMetadataUrl(issuer);
+  let doc;
+  try {
+    const res = await fetch(url, { headers: { accept: 'application/json' } });
+    doc = { status: res.status, body: await res.json().catch(() => undefined) };
+  } catch (error) {
+    doc = { status: `ERR ${error}`, body: undefined };
   }
-} else {
-  console.log(
-    `note: authorization is delegated to ${JSON.stringify(originDoc.body?.authorization_servers)} — skipping AS metadata checks`
+
+  check(`AS metadata for ${issuer} is 200 at its derived URL`, doc.status === 200, `${url} → ${doc.status}`);
+  check(
+    `AS metadata for ${issuer} declares a matching issuer`,
+    doc.body?.issuer === issuer,
+    `issuer=${doc.body?.issuer} expected=${issuer}`
   );
+  for (const field of ['authorization_endpoint', 'token_endpoint']) {
+    check(`AS metadata for ${issuer} advertises ${field}`, !!doc.body?.[field], String(doc.body?.[field]));
+  }
 }
 
 // --- report ---------------------------------------------------------------
