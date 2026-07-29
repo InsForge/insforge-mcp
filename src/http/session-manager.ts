@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { getRedisClient } from './redis.js';
 import { registerInsforgeTools } from '../shared/tools/index.js';
+import { sdkToolHost } from '../shared/tools/host.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
 
 /**
@@ -76,7 +77,7 @@ export class SessionManager {
       version: PACKAGE_VERSION,
     });
 
-    const toolsConfig = await registerInsforgeTools(server, {
+    const toolsConfig = await registerInsforgeTools(sdkToolHost(server), {
       apiKey: sessionData.apiKey,
       apiBaseUrl: sessionData.apiBaseUrl,
       mode: 'remote',
@@ -195,7 +196,7 @@ export class SessionManager {
       version: PACKAGE_VERSION,
     });
 
-    await registerInsforgeTools(server, {
+    await registerInsforgeTools(sdkToolHost(server), {
       apiKey: sessionData.apiKey,
       apiBaseUrl: sessionData.apiBaseUrl,
       mode: 'remote',
@@ -235,7 +236,7 @@ export class SessionManager {
       version: PACKAGE_VERSION,
     });
 
-    const toolsConfig = await registerInsforgeTools(server, {
+    const toolsConfig = await registerInsforgeTools(sdkToolHost(server), {
       apiKey: sessionData.apiKey,
       apiBaseUrl: sessionData.apiBaseUrl,
       mode: 'remote',

@@ -3,6 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { program } from 'commander';
 import { PACKAGE_VERSION } from '../shared/version.js';
 import { registerInsforgeTools } from '../shared/tools/index.js';
+import { sdkToolHost } from '../shared/tools/host.js';
 
 // Parse command line arguments
 program
@@ -24,7 +25,7 @@ async function main() {
   });
 
   // Register all Insforge tools with the server (async to support dynamic version-based registration)
-  const toolsConfig = await registerInsforgeTools(server, {
+  const toolsConfig = await registerInsforgeTools(sdkToolHost(server), {
     apiKey: api_key,
     apiBaseUrl: api_base_url || process.env.API_BASE_URL,
     mode: 'local',
