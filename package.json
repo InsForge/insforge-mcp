@@ -11,6 +11,7 @@
     "insforge-mcp-server": "./dist/http-server.js"
   },
   "scripts": {
+    "start": "node dist/http-server.js --host 0.0.0.0",
     "dev:stdio": "tsx watch src/stdio/index.ts",
     "dev:http": "tsx watch src/http/server.ts",
     "build": "tsup",
