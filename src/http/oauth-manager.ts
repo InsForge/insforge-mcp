@@ -73,17 +73,32 @@ interface TokenBinding {
   apiKey: string;
   createdAt: number;
   lastUsedAt: number;
+  /**
+   * The registration this binding was issued through, so ordinary use can keep
+   * that registration alive. Optional on purpose: bindTokenToProject serves the
+   * direct bind API, where there is no registered OAuth client at all. Also
+   * absent from every binding written before this field existed.
+   */
+  clientId?: string;
 }
 
 // Redis key prefixes
 const AUTH_STATE_PREFIX = 'mcp:auth:state:';
 const TOKEN_BINDING_PREFIX = 'mcp:auth:binding:';
 const AUTH_CODE_PREFIX = 'mcp:auth:code:';
+export const CLIENT_REGISTRATION_PREFIX = 'mcp:oauth:client:';
 
 // TTLs
 const AUTH_STATE_TTL = 10 * 60; // 10 minutes
 const AUTH_CODE_TTL = 5 * 60; // 5 minutes
 const TOKEN_BINDING_TTL = 30 * 24 * 60 * 60; // 30 days
+/**
+ * How long a client registration survives without being used.
+ *
+ * Refreshed alongside the binding on every authenticated request, and at
+ * /oauth/authorize, so this is an idle timeout rather than a lifetime.
+ */
+export const CLIENT_REGISTRATION_TTL = 30 * 24 * 60 * 60; // 30 days
 
 /**
  * Generate a hash of the token for storage
@@ -195,6 +210,7 @@ export class OAuthManager {
       apiKey: projectAccess.apiKey,
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
+      clientId: authState.clientId,
     };
 
     // Store the binding
@@ -314,6 +330,21 @@ export class OAuthManager {
         TOKEN_BINDING_TTL,
         JSON.stringify(binding)
       );
+
+      // Slide the registration on the same beat. Without this the two records
+      // renew on different events: the binding on every authenticated request,
+      // the registration only at /oauth/authorize. An ordinary user signs in
+      // once and then only calls tools, so their token renews forever while
+      // the registration behind it still dies on a fixed schedule.
+      if (binding.clientId) {
+        try {
+          await redis.expire(CLIENT_REGISTRATION_PREFIX + binding.clientId, CLIENT_REGISTRATION_TTL);
+        } catch (error) {
+          // Never fail a request over a TTL refresh; the worst case is the
+          // registration keeping the expiry it already had.
+          console.error(`[OAuthManager] Could not refresh registration TTL for ${binding.clientId}:`, error);
+        }
+      }
     }
   }
 
