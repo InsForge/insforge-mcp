@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import { randomUUID, createHash } from 'crypto';
+import v8 from 'node:v8';
 
 // Transport imports
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -126,6 +127,25 @@ function extractLegacyHeaders(req: Request): { apiKey?: string; apiBaseUrl?: str
   };
 }
 
+/**
+ * Heap numbers for the health payload.
+ *
+ * The session leak had to be diagnosed by counting objects and multiplying by
+ * a separately-measured size, because the process publishes no memory metric
+ * at all — so "how long until it dies" could only ever be an estimate. V8's
+ * own limit is the number that actually decides that, and exposing it costs
+ * nothing.
+ */
+function heapStats() {
+  const { heap_size_limit, used_heap_size } = v8.getHeapStatistics();
+  return {
+    heapUsedMb: Math.round(used_heap_size / 1024 / 1024),
+    heapLimitMb: Math.round(heap_size_limit / 1024 / 1024),
+    heapUsedPct: Math.round((used_heap_size / heap_size_limit) * 100),
+    rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+  };
+}
+
 // ============================================================================
 // Health & Discovery Endpoints
 // ============================================================================
@@ -143,6 +163,7 @@ app.get(API_ENDPOINTS.health, async (_req: Request, res: Response) => {
       sse: '2024-11-05 (deprecated)',
     },
     sessions: stats,
+    memory: heapStats(),
     authentication: 'OAuth Bearer Token',
   });
 });
