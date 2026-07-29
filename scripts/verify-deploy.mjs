@@ -27,6 +27,17 @@ let failed = 0;
 const baseOrigin = new URL(base).origin;
 
 /**
+ * Every request this script makes carries a deadline.
+ *
+ * It runs on a schedule and as a deploy gate, so a stalled endpoint would
+ * otherwise hang until the CI runner's own timeout and the whole check report
+ * would be lost — a server that never answers is a failure worth reporting,
+ * not a reason to report nothing.
+ */
+const TIMEOUT_MS = Number(process.env.VERIFY_TIMEOUT_MS) > 0 ? Number(process.env.VERIFY_TIMEOUT_MS) : 10_000;
+const deadline = () => AbortSignal.timeout(TIMEOUT_MS);
+
+/**
  * Record an assertion.
  *
  * scope 'target'   — describes the deployment named on the command line.
@@ -54,7 +65,7 @@ function check(name, ok, detail, scope = 'target') {
 /** Raw fetch that yields null instead of throwing. */
 async function fetchOrNull(url, init) {
   try {
-    return await fetch(url, init);
+    return await fetch(url, { ...init, signal: deadline() });
   } catch {
     return null;
   }
@@ -70,7 +81,7 @@ function unreachable(error) {
 async function getJson(path) {
   let res;
   try {
-    res = await fetch(base + path, { headers: { accept: 'application/json' } });
+    res = await fetch(base + path, { headers: { accept: 'application/json' }, signal: deadline() });
   } catch (error) {
     return { status: unreachable(error), body: undefined, headers: undefined };
   }
@@ -192,8 +203,11 @@ check(
   authorize.body?.error_description || `status ${authorize.status}`
 );
 check(
+  // Only 400. The handler validates its parameters before it can redirect, so
+  // a bare probe can never legitimately produce a 302 — accepting one would
+  // quietly excuse a proxy or a route change that started answering here.
   'the authorize endpoint is reachable and validating',
-  authorize.status === 400 || authorize.status === 302,
+  authorize.status === 400,
   `status ${authorize.status}`
 );
 
@@ -292,7 +306,7 @@ for (const { issuer, labels } of issuerSources.values()) {
   const url = asMetadataUrl(issuer);
   let doc;
   try {
-    const res = await fetch(url, { headers: { accept: 'application/json' } });
+    const res = await fetch(url, { headers: { accept: 'application/json' }, signal: deadline() });
     doc = { status: res.status, body: await res.json().catch(() => undefined) };
   } catch (error) {
     doc = { status: `ERR ${error}`, body: undefined };
