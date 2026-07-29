@@ -104,13 +104,24 @@ if (typeof health.status === 'string' && health.status.startsWith('unreachable')
   console.log(`\n${base} did not answer at all. Nothing else was checked.`);
   process.exit(1);
 }
-if (expectedVersion) {
-  check(
-    `/health reports version ${expectedVersion}`,
-    health.body?.version === expectedVersion,
-    `got ${health.body?.version}`
-  );
-}
+// A 200 on /health proves something answered, not that WE answered.
+// Manufact's gateway returns {"status":"healthy","timestamp":...} with a 200
+// whether or not a container is running behind it, so a 200-only assertion is
+// green against an empty deployment. Ours names itself; the placeholder cannot.
+check(
+  '/health is our server, not a platform placeholder',
+  health.body?.server === 'insforge-mcp',
+  `server=${JSON.stringify(health.body?.server)} body=${JSON.stringify(health.body)?.slice(0, 120)}`
+);
+
+// Reported unconditionally: a container serving the right name at the wrong
+// build is the failure that let production sit 139 days stale, and leaving the
+// version unasserted is how that stays invisible.
+check(
+  expectedVersion ? `/health reports version ${expectedVersion}` : '/health reports a version',
+  expectedVersion ? health.body?.version === expectedVersion : !!health.body?.version,
+  `got ${health.body?.version}`
+);
 
 // Runtime sessions should not run away from the ones Redis still holds. A
 // small excess is normal in-flight; an order of magnitude is the leak.
