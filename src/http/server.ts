@@ -899,6 +899,13 @@ app.get(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
     });
   }
 
+  // This stream is the only sign of life for a client that opens it and then
+  // sends nothing. Hold the session for as long as it is open, and restart the
+  // Redis record's clock now so a restart can still restore the session.
+  sessionManager.openStream(sessionId);
+  res.on('close', () => sessionManager.closeStream(sessionId));
+  await sessionManager.touchSession(sessionId);
+
   await runtime.transport.handleRequest(req, res, req.body);
 });
 

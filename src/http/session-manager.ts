@@ -42,6 +42,10 @@ interface RuntimeSession {
   // monotonic clock. Tracked in memory because it is the only record of
   // activity that survives Redis losing its data — see selectOrphanedSessions.
   lastSeenAt: number;
+  // Server->client streams currently open for this session (GET /mcp). A stream
+  // is activity that leaves no other trace: it produces no requests to stamp
+  // lastSeenAt and nothing that refreshes the Redis record.
+  openStreams: number;
 }
 
 // Redis key prefix
@@ -72,6 +76,7 @@ export function monotonicNow(): number {
 export interface SweepCandidate {
   sessionId: string;
   lastSeenAt: number;
+  openStreams: number;
 }
 
 /**
@@ -99,6 +104,12 @@ export interface SweepCandidate {
  * They diverge in exactly one case: Redis lost a record early. Then the
  * session we saw traffic on minutes ago is held, and one genuinely abandoned
  * is still collected on schedule.
+ *
+ * An open server->client stream counts as alive on its own. It is the one form
+ * of activity that stamps neither clock — the client holds GET /mcp open and
+ * may send no requests at all, so the record ages out and lastSeenAt stays
+ * frozen at the moment the stream opened. Both clocks then agree to reap a
+ * client that is plainly still connected.
  */
 export function selectOrphanedSessions(
   sessions: SweepCandidate[],
@@ -106,7 +117,30 @@ export function selectOrphanedSessions(
   now: number = monotonicNow()
 ): string[] {
   return sessions
-    .filter((session, i) => exists[i] === 0 && now - session.lastSeenAt >= SESSION_TTL_MS)
+    .filter(
+      (session, i) =>
+        exists[i] === 0 &&
+        session.openStreams === 0 &&
+        now - session.lastSeenAt >= SESSION_TTL_MS
+    )
+    .map((session) => session.sessionId);
+}
+
+/**
+ * Sessions whose Redis record vanished while they were still inside their TTL.
+ *
+ * That combination is evidence of Redis losing data rather than expiring it,
+ * and it is the only thing worth waking an operator for — the records are not
+ * coming back on their own. A session held only because a stream is open is
+ * NOT evidence of anything: its record expired on schedule, which is normal.
+ */
+export function selectPrematurelyMissing(
+  sessions: SweepCandidate[],
+  exists: number[],
+  now: number = monotonicNow()
+): string[] {
+  return sessions
+    .filter((session, i) => exists[i] === 0 && now - session.lastSeenAt < SESSION_TTL_MS)
     .map((session) => session.sessionId);
 }
 
@@ -172,7 +206,7 @@ export class SessionManager {
     );
 
     // Store runtime instances in memory
-    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'streamable', lastSeenAt: monotonicNow() });
+    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'streamable', lastSeenAt: monotonicNow(), openStreams: 0 });
 
     console.log(`[SessionManager] Session created: ${sessionId}`);
     return server;
@@ -274,7 +308,7 @@ export class SessionManager {
     await server.connect(transport);
 
     // Store runtime instances in memory
-    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'streamable', lastSeenAt: monotonicNow() });
+    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'streamable', lastSeenAt: monotonicNow(), openStreams: 0 });
 
     // Update last accessed time
     await this.touchSession(sessionId);
@@ -332,7 +366,7 @@ export class SessionManager {
     );
 
     // Store runtime instances in memory
-    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'sse', lastSeenAt: monotonicNow() });
+    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'sse', lastSeenAt: monotonicNow(), openStreams: 0 });
 
     console.log(`[SessionManager] SSE session created: ${sessionId}`);
     return server;
@@ -341,6 +375,38 @@ export class SessionManager {
   /**
    * Update last accessed time and refresh TTL
    */
+  /**
+   * Register a server->client stream as open, and stamp the session.
+   *
+   * Deliberately a count rather than a flag: a client may reconnect its stream
+   * before the old response has finished closing, and a flag cleared by the
+   * departing one would leave a live stream unprotected.
+   */
+  openStream(sessionId: string): void {
+    const runtime = this.runtimeSessions.get(sessionId);
+    if (!runtime) return;
+    runtime.openStreams += 1;
+    runtime.lastSeenAt = monotonicNow();
+  }
+
+  /**
+   * Release a stream. Safe to call for a session that has already been deleted,
+   * which happens whenever a close event lands after a reap or a DELETE.
+   */
+  closeStream(sessionId: string): void {
+    const runtime = this.runtimeSessions.get(sessionId);
+    if (!runtime) return;
+    runtime.openStreams = Math.max(0, runtime.openStreams - 1);
+    // The stream was alive right up to this moment; start the idle clock here
+    // rather than from whenever it opened.
+    runtime.lastSeenAt = monotonicNow();
+  }
+
+  /** Open stream count, for tests and diagnostics. */
+  getOpenStreamCount(sessionId: string): number {
+    return this.runtimeSessions.get(sessionId)?.openStreams ?? 0;
+  }
+
   async touchSession(sessionId: string): Promise<void> {
     const redis = getRedisClient();
 
@@ -401,7 +467,11 @@ export class SessionManager {
     // connection is still open when it does.
     const candidates: SweepCandidate[] = Array.from(this.runtimeSessions.entries())
       .filter(([, session]) => session.transportType === 'streamable')
-      .map(([sessionId, session]) => ({ sessionId, lastSeenAt: session.lastSeenAt }));
+      .map(([sessionId, session]) => ({
+        sessionId,
+        lastSeenAt: session.lastSeenAt,
+        openStreams: session.openStreams,
+      }));
     if (candidates.length === 0) {
       return 0;
     }
@@ -429,7 +499,7 @@ export class SessionManager {
     // Records gone while the session is still inside its TTL means Redis lost
     // data rather than expired it. Worth a line in the log: these sessions
     // survive the sweep but their records will not come back on their own.
-    const heldBack = exists.filter((e) => e === 0).length - orphaned.length;
+    const heldBack = selectPrematurelyMissing(candidates, exists).length;
     if (heldBack > 0) {
       console.warn(
         `[SessionManager] ${heldBack} session(s) lost their Redis record before TTL — holding them; check Redis for a restart, failover or eviction`

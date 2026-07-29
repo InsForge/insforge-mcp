@@ -15,7 +15,13 @@ vi.mock('./redis.js', () => ({
   }),
 }));
 
-const { SessionManager, selectOrphanedSessions, SESSION_TTL_MS, monotonicNow } = await import('./session-manager.js');
+const {
+  SessionManager,
+  selectOrphanedSessions,
+  selectPrematurelyMissing,
+  SESSION_TTL_MS,
+  monotonicNow,
+} = await import('./session-manager.js');
 
 /** A session whose last traffic is old enough that its record should have expired. */
 const STALE = -(SESSION_TTL_MS + 1000);
@@ -29,6 +35,7 @@ function fakeRuntime(transportType: 'streamable' | 'sse' = 'streamable', ageOffs
     transport: { close: vi.fn().mockResolvedValue(undefined) },
     transportType,
     lastSeenAt: monotonicNow() + ageOffsetMs,
+    openStreams: 0,
   };
 }
 
@@ -52,7 +59,7 @@ describe('selectOrphanedSessions', () => {
   const now = 1_800_000_000_000;
   /** Sessions whose records should already have expired on their own. */
   const aged = (...ids: string[]) =>
-    ids.map((sessionId) => ({ sessionId, lastSeenAt: now - SESSION_TTL_MS - 1000 }));
+    ids.map((sessionId) => ({ sessionId, lastSeenAt: now - SESSION_TTL_MS - 1000, openStreams: 0 }));
 
   it('picks exactly the ids whose Redis record is gone', () => {
     expect(selectOrphanedSessions(aged('a', 'b', 'c'), [1, 0, 1], now)).toEqual(['b']);
@@ -68,21 +75,63 @@ describe('selectOrphanedSessions', () => {
 
   it('holds a session whose record vanished well inside its TTL', () => {
     // Redis losing data, not Redis expiring a session.
-    const active = [{ sessionId: 'busy', lastSeenAt: now - 60_000 }];
+    const active = [{ sessionId: 'busy', lastSeenAt: now - 60_000, openStreams: 0 }];
     expect(selectOrphanedSessions(active, [0], now)).toEqual([]);
   });
 
   it('separates the wiped-but-active from the genuinely abandoned', () => {
     const mixed = [
-      { sessionId: 'active', lastSeenAt: now - 60_000 },
-      { sessionId: 'abandoned', lastSeenAt: now - SESSION_TTL_MS - 1 },
+      { sessionId: 'active', lastSeenAt: now - 60_000, openStreams: 0 },
+      { sessionId: 'abandoned', lastSeenAt: now - SESSION_TTL_MS - 1, openStreams: 0 },
     ];
     expect(selectOrphanedSessions(mixed, [0, 0], now)).toEqual(['abandoned']);
   });
 
+  it('holds a session with an open stream, however old both clocks are', () => {
+    // The client is plainly connected — it just has nothing to say.
+    const streaming = [
+      { sessionId: 'listening', lastSeenAt: now - SESSION_TTL_MS * 10, openStreams: 1 },
+    ];
+    expect(selectOrphanedSessions(streaming, [0], now)).toEqual([]);
+  });
+
+  it('reaps once the last stream has closed', () => {
+    const closed = [
+      { sessionId: 'was-listening', lastSeenAt: now - SESSION_TTL_MS - 1, openStreams: 0 },
+    ];
+    expect(selectOrphanedSessions(closed, [0], now)).toEqual(['was-listening']);
+  });
+
   it('reaps a session exactly at the TTL boundary', () => {
-    const boundary = [{ sessionId: 'edge', lastSeenAt: now - SESSION_TTL_MS }];
+    const boundary = [{ sessionId: 'edge', lastSeenAt: now - SESSION_TTL_MS, openStreams: 0 }];
     expect(selectOrphanedSessions(boundary, [0], now)).toEqual(['edge']);
+  });
+});
+
+describe('selectPrematurelyMissing', () => {
+  const now = 1_800_000_000_000;
+
+  it('flags a record that vanished while the session was still inside its TTL', () => {
+    const s = [{ sessionId: 'busy', lastSeenAt: now - 60_000, openStreams: 0 }];
+    expect(selectPrematurelyMissing(s, [0], now)).toEqual(['busy']);
+  });
+
+  it('says nothing about a record that expired on schedule', () => {
+    // Normal expiry is not evidence of anything and must not send an operator
+    // looking for a Redis fault.
+    const s = [{ sessionId: 'old', lastSeenAt: now - SESSION_TTL_MS - 1, openStreams: 0 }];
+    expect(selectPrematurelyMissing(s, [0], now)).toEqual([]);
+  });
+
+  it('does not flag a long-open stream whose record expired normally', () => {
+    // Held by its stream, not by the TTL gate — so it is not a Redis symptom.
+    const s = [{ sessionId: 'listening', lastSeenAt: now - SESSION_TTL_MS - 1, openStreams: 1 }];
+    expect(selectPrematurelyMissing(s, [0], now)).toEqual([]);
+  });
+
+  it('says nothing when the records are present', () => {
+    const s = [{ sessionId: 'fine', lastSeenAt: now - 60_000, openStreams: 0 }];
+    expect(selectPrematurelyMissing(s, [1], now)).toEqual([]);
   });
 });
 
@@ -181,6 +230,59 @@ describe('SessionManager.sweepOrphanedSessions', () => {
 
     await expect(manager.sweepOrphanedSessions()).resolves.toBe(45);
     expect(manager.getActiveSessionIds()).toHaveLength(5);
+  });
+
+  it('never reaps a streamable session while its stream is open', async () => {
+    // Quinn's case: the client holds GET /mcp open and sends no POSTs, so the
+    // Redis record lapses and lastSeenAt is frozen at the moment it opened.
+    // Both clocks agree to reap a client that is still connected.
+    const manager = new SessionManager();
+    const runtimes = seed(manager, ['listening'], 'streamable', STALE);
+    manager.openStream('listening');
+    pipelineExec.mockResolvedValue([[null, 0]]);
+
+    await expect(manager.sweepOrphanedSessions()).resolves.toBe(0);
+    expect(manager.getActiveSessionIds()).toEqual(['listening']);
+    expect(runtimes.get('listening')!.transport.close).not.toHaveBeenCalled();
+  });
+
+  it('collects the session once the stream closes and it goes idle', async () => {
+    const manager = new SessionManager();
+    seed(manager, ['listening'], 'streamable', STALE);
+    manager.openStream('listening');
+    manager.closeStream('listening');
+    // closeStream restarts the idle clock, so it is not immediately collectable.
+    pipelineExec.mockResolvedValue([[null, 0]]);
+    await expect(manager.sweepOrphanedSessions()).resolves.toBe(0);
+
+    // Age it past the TTL again and it goes, exactly as an idle session should.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (manager as any).runtimeSessions.get('listening').lastSeenAt = monotonicNow() + STALE;
+    pipelineExec.mockResolvedValue([[null, 0]]);
+    await expect(manager.sweepOrphanedSessions()).resolves.toBe(1);
+    expect(manager.getActiveSessionIds()).toEqual([]);
+  });
+
+  it('counts overlapping streams so a reconnect cannot unprotect the session', async () => {
+    // A client may open its replacement stream before the old response has
+    // finished closing. A boolean flag cleared by the departing one would drop
+    // the guard while a live stream is still attached.
+    const manager = new SessionManager();
+    seed(manager, ['reconnecting'], 'streamable', STALE);
+    manager.openStream('reconnecting');
+    manager.openStream('reconnecting');
+    manager.closeStream('reconnecting');
+    expect(manager.getOpenStreamCount('reconnecting')).toBe(1);
+
+    pipelineExec.mockResolvedValue([[null, 0]]);
+    await expect(manager.sweepOrphanedSessions()).resolves.toBe(0);
+  });
+
+  it('ignores a stream close for a session that is already gone', async () => {
+    // Close events land after a reap or an explicit DELETE all the time.
+    const manager = new SessionManager();
+    expect(() => manager.closeStream('never-existed')).not.toThrow();
+    expect(manager.getOpenStreamCount('never-existed')).toBe(0);
   });
 
   it('keeps every session when Redis comes back empty', async () => {
