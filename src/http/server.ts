@@ -9,7 +9,11 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 // Local imports
 import { getSessionManager } from './session-manager.js';
 import { getRedisClient, closeRedisClient, getRedisConfig } from './redis.js';
-import { getOAuthManager } from './oauth-manager.js';
+import {
+  getOAuthManager,
+  CLIENT_REGISTRATION_PREFIX,
+  CLIENT_REGISTRATION_TTL,
+} from './oauth-manager.js';
 import {
   SERVER_CONFIG,
   INSFORGE_CONFIG,
@@ -79,17 +83,6 @@ function isInitializeRequest(body: unknown): boolean {
 
   return false;
 }
-
-/**
- * How long a client registration survives without being used.
- *
- * Refreshed on every successful authorize (see below), so this is an idle
- * timeout rather than a hard lifetime. It used to be neither: the value was
- * written once at registration and never touched again, so every client
- * stopped working exactly 30 days after it registered no matter how heavily
- * it was being used.
- */
-const CLIENT_REGISTRATION_TTL = 30 * 24 * 60 * 60;
 
 /**
  * Whether this request is a browser navigation rather than a program's fetch.
@@ -239,7 +232,7 @@ app.post(OAUTH_ENDPOINTS.register, async (req: Request, res: Response) => {
   };
 
   await redis.setex(
-    `mcp:oauth:client:${clientId}`,
+    CLIENT_REGISTRATION_PREFIX + clientId,
     CLIENT_REGISTRATION_TTL,
     JSON.stringify(clientData)
   );
@@ -290,7 +283,7 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
 
   // Validate client_id and redirect_uri
   const redis = getRedisClient();
-  const clientKey = `mcp:oauth:client:${client_id}`;
+  const clientKey = CLIENT_REGISTRATION_PREFIX + client_id;
   const clientDataStr = await redis.get(clientKey);
   if (!clientDataStr) {
     // Nothing here can recover automatically. The MCP SDK only re-registers on
