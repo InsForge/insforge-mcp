@@ -23,6 +23,7 @@ import {
   validateConfig,
 } from './config.js';
 import { renderProjectSelectionPage } from './templates/project-selection.js';
+import { renderOAuthErrorPage } from './templates/oauth-error.js';
 import { getAnalyticsService, extractClientInfo } from './analytics.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
 
@@ -77,6 +78,28 @@ function isInitializeRequest(body: unknown): boolean {
   }
 
   return false;
+}
+
+/**
+ * How long a client registration survives without being used.
+ *
+ * Refreshed on every successful authorize (see below), so this is an idle
+ * timeout rather than a hard lifetime. It used to be neither: the value was
+ * written once at registration and never touched again, so every client
+ * stopped working exactly 30 days after it registered no matter how heavily
+ * it was being used.
+ */
+const CLIENT_REGISTRATION_TTL = 30 * 24 * 60 * 60;
+
+/**
+ * Whether this request is a browser navigation rather than a program's fetch.
+ *
+ * The authorize endpoint is reached by opening a URL in the user's browser —
+ * the MCP client never reads the response itself — so an error here has to be
+ * written for a person. Everything else still gets the OAuth JSON body.
+ */
+function prefersHtml(req: Request): boolean {
+  return req.accepts(['json', 'html']) === 'html';
 }
 
 /**
@@ -217,7 +240,7 @@ app.post(OAUTH_ENDPOINTS.register, async (req: Request, res: Response) => {
 
   await redis.setex(
     `mcp:oauth:client:${clientId}`,
-    30 * 24 * 60 * 60,
+    CLIENT_REGISTRATION_TTL,
     JSON.stringify(clientData)
   );
 
@@ -267,8 +290,26 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
 
   // Validate client_id and redirect_uri
   const redis = getRedisClient();
-  const clientDataStr = await redis.get(`mcp:oauth:client:${client_id}`);
+  const clientKey = `mcp:oauth:client:${client_id}`;
+  const clientDataStr = await redis.get(clientKey);
   if (!clientDataStr) {
+    // Nothing here can recover automatically. The MCP SDK only re-registers on
+    // an invalid_client from the token endpoint or from registration, and it
+    // never sees this response — the browser does. So the person holding the
+    // tab is the only one who can act, and they need to be told how.
+    console.log(`[OAuth] Unknown client_id at authorize: ${client_id}`);
+    if (prefersHtml(req)) {
+      return res.status(400).type('html').send(
+        renderOAuthErrorPage({
+          heading: 'This connection needs to be set up again',
+          message:
+            'The app you are connecting from is not registered with this server any more. ' +
+            'Nothing is wrong with your account and no data was lost — remove the InsForge MCP ' +
+            'server from your client and add it back, and this will complete normally.',
+          action: 'npx @insforge/install',
+        })
+      );
+    }
     return res.status(400).json({
       error: 'invalid_client',
       error_description: 'Unknown client_id. Register client first via /oauth/register.',
@@ -309,6 +350,16 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
       error: 'invalid_request',
       error_description: 'redirect_uri does not match any registered redirect URIs for this client.',
     });
+  }
+
+  // The registration has been used successfully, so restart its idle clock.
+  // Without this the record expires on a fixed schedule from the moment it was
+  // written, taking working clients down with it. Failing to refresh must not
+  // fail the login — the worst case is the record expiring on its old schedule.
+  try {
+    await redis.expire(clientKey, CLIENT_REGISTRATION_TTL);
+  } catch (error) {
+    console.error(`[OAuth] Could not refresh registration TTL for ${client_id}:`, error);
   }
 
   try {
