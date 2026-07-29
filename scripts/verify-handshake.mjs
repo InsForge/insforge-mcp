@@ -27,6 +27,24 @@ if (!target) {
   process.exit(2);
 }
 
+// This script obtains a real access token and sends it to the target. Over
+// plaintext that is a credential on the wire, so refuse unless it is loopback.
+{
+  let parsed;
+  try {
+    parsed = new URL(target);
+  } catch {
+    console.error(`not a URL: ${target}`);
+    process.exit(2);
+  }
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
+  if (parsed.protocol !== 'https:' && !loopback) {
+    console.error(`refusing to send a bearer token to ${target} over ${parsed.protocol}`);
+    console.error('use https, or point this at a loopback address for local testing.');
+    process.exit(2);
+  }
+}
+
 const CALLBACK_PORT = Number(process.env.HANDSHAKE_PORT) || 8765;
 const CALLBACK_URL = `http://127.0.0.1:${CALLBACK_PORT}/callback`;
 const TIMEOUT_MS = Number(process.env.HANDSHAKE_TIMEOUT_MS) || 5 * 60 * 1000;
@@ -41,6 +59,11 @@ const mark = (s, detail) => {
 function waitForCallback() {
   let resolve, reject;
   const promise = new Promise((res, rej) => ((resolve = res), (reject = rej)));
+  // The listener can fail (EADDRINUSE) long before anything awaits this, and an
+  // unhandled rejection kills the process with a stack trace — the exact
+  // failure mode this script exists to replace. Keep it handled; the real
+  // await below still sees the rejection.
+  promise.catch(() => {});
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${CALLBACK_PORT}`);
     if (url.pathname !== '/callback') {
@@ -55,6 +78,11 @@ function waitForCallback() {
     if (code) resolve(code);
     else reject(new Error(`authorization returned error=${error}`));
   });
+  // Without this, a port already in use surfaces as an uncaught exception
+  // rather than as a named failure — and this script exists to name failures.
+  server.on('error', (error) =>
+    reject(new Error(`could not listen on ${CALLBACK_PORT}: ${error.message}. Set HANDSHAKE_PORT.`))
+  );
   server.listen(CALLBACK_PORT, '127.0.0.1');
   const timer = setTimeout(() => {
     server.close();
@@ -106,7 +134,7 @@ const fail = (error) => {
 
 const run = async () => {
   mark('discovery + registration', `against ${target}`);
-  const client = new Client({ name: 'insforge-handshake', version: '1.0.0' }, { capabilities: {} });
+  let client = new Client({ name: 'insforge-handshake', version: '1.0.0' }, { capabilities: {} });
   const url = new URL(`${target}/mcp`);
 
   let transport = new StreamableHTTPClientTransport(url, { authProvider: provider });
@@ -145,6 +173,14 @@ const run = async () => {
     }
 
     mark('connect', 'initialize, with the token');
+    // A Client keeps hold of the transport it was connected with, so calling
+    // connect() again throws "Already connected to a transport". The first
+    // attempt is finished with either way — close it and use a fresh pair.
+    // This is the success path, which is exactly the path that cannot be
+    // exercised without real credentials, so it went unnoticed until review.
+    await transport.close().catch(() => {});
+    await client.close().catch(() => {});
+    client = new Client({ name: 'insforge-handshake', version: '1.0.0' }, { capabilities: {} });
     transport = new StreamableHTTPClientTransport(url, { authProvider: provider });
     try {
       await client.connect(transport);
