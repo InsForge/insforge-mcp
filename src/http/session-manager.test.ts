@@ -380,3 +380,61 @@ describe('SessionManager idle sweep timer', () => {
     logged.mockRestore();
   });
 });
+
+describe('EXISTS replies that are not a number', () => {
+  beforeEach(() => {
+    pipelineExec.mockReset();
+    redisDel.mockReset().mockResolvedValue(1);
+    redisGet.mockReset().mockResolvedValue(null);
+    redisSetex.mockReset().mockResolvedValue('OK');
+  });
+
+  it('treats a null reply as alive, not as an expired session', async () => {
+    // Number(null) is 0, so a bare cast turns "Redis said something odd" into
+    // "reap this". EXISTS answers with an integer or nothing useful at all.
+    const manager = new SessionManager();
+    seed(manager, ['a', 'b'], 'streamable', STALE);
+    pipelineExec.mockResolvedValue([
+      [null, null],
+      [null, undefined],
+    ]);
+
+    await expect(manager.sweepOrphanedSessions()).resolves.toBe(0);
+    expect(manager.getActiveSessionIds()).toEqual(['a', 'b']);
+  });
+
+  it('still reaps on an honest zero', async () => {
+    const manager = new SessionManager();
+    seed(manager, ['gone'], 'streamable', STALE);
+    pipelineExec.mockResolvedValue([[null, 0]]);
+
+    await expect(manager.sweepOrphanedSessions()).resolves.toBe(1);
+  });
+});
+
+describe('a session touched between the EXISTS round trip and the delete', () => {
+  beforeEach(() => {
+    pipelineExec.mockReset();
+    redisDel.mockReset().mockResolvedValue(1);
+    redisGet.mockReset().mockResolvedValue(null);
+    redisSetex.mockReset().mockResolvedValue('OK');
+  });
+
+  it('is not closed, because the live entry is re-checked', async () => {
+    // The candidate list is a snapshot taken before the pipeline. A request
+    // arriving in that window stamps lastSeenAt and rewrites the record, so
+    // acting on the snapshot would close a session that just proved it is live.
+    const manager = new SessionManager();
+    const runtimes = seed(manager, ['racing'], 'streamable', STALE);
+
+    pipelineExec.mockImplementation(async () => {
+      // The request lands while Redis is answering.
+      await manager.touchSession('racing');
+      return [[null, 0]];
+    });
+
+    await expect(manager.sweepOrphanedSessions()).resolves.toBe(0);
+    expect(manager.getActiveSessionIds()).toEqual(['racing']);
+    expect(runtimes.get('racing')!.transport.close).not.toHaveBeenCalled();
+  });
+});

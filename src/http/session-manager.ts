@@ -488,12 +488,32 @@ export class SessionManager {
     const exists = candidates.map((_, i) => {
       const reply = replies?.[i];
       if (!reply || reply[0]) return 1;
-      return Number(reply[1]);
+      const value = reply[1];
+      // EXISTS answers with an integer. Anything else — null in particular —
+      // is not a statement that the key is absent, and Number(null) is 0, so a
+      // bare cast turns an indeterminate reply into "reap this". Alive unless
+      // Redis actually said zero.
+      if (typeof value !== 'number' && typeof value !== 'string') return 1;
+      const count = Number(value);
+      return Number.isInteger(count) ? count : 1;
     });
 
-    const orphaned = selectOrphanedSessions(candidates, exists);
-    for (const sessionId of orphaned) {
+    const selected = selectOrphanedSessions(candidates, exists);
+
+    // Re-check each one against the live entry immediately before closing it.
+    // The candidate list is a snapshot taken before the EXISTS round trip, and
+    // a request can arrive in that window: touchSession stamps lastSeenAt and
+    // rewrites the record, so acting on the snapshot would close a session that
+    // just proved it is alive.
+    const orphaned: string[] = [];
+    for (const sessionId of selected) {
+      const current = this.runtimeSessions.get(sessionId);
+      if (!current) continue;
+      if (current.openStreams > 0 || monotonicNow() - current.lastSeenAt < SESSION_TTL_MS) {
+        continue;
+      }
       await this.deleteSession(sessionId);
+      orphaned.push(sessionId);
     }
 
     // Records gone while the session is still inside its TTL means Redis lost

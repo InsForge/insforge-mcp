@@ -1118,7 +1118,7 @@ app.post(SSE_ENDPOINTS.messages, async (req: Request, res: Response) => {
   getSessionManager()
     .touchSession(sessionId)
     .catch((error) => {
-      console.error(`[SSE] Failed to refresh session ${sessionId}:`, error);
+      console.error(`[SSE] Failed to refresh session ${tokenFingerprint(sessionId)}`, error);
     });
 
   await transport.handlePostMessage(req, res, req.body);
