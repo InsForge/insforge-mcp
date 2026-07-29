@@ -30,19 +30,50 @@ const baseOrigin = new URL(base).origin;
  * Record an assertion.
  *
  * scope 'target'   — describes the deployment named on the command line.
- * scope 'external' — describes some other host the documents pointed us at.
- *   These are reported but never scored. Before a DNS cutover the box under
- *   test still advertises the FINAL hostname as its authorization server, so
- *   following that chain scores the machine being replaced. Counting those as
- *   passes makes a fifth of the gate green because the old box is still up.
+ * scope 'external' — describes some other host, reported but never scored.
+ *
+ * "Different origin" alone is the wrong test, because it also describes a
+ * resource server that legitimately delegates to a separate authorization
+ * server — which is where this codebase is heading. Under that reading a real
+ * failure of a real dependency prints OFF-TARGET and does not count, which
+ * fails in the green direction.
+ *
+ * The discriminator is whether the box agrees about where it lives. Before a
+ * DNS cutover it does not: reached on a temporary URL, it still publishes the
+ * FINAL hostname as its own identifier, and that same hostname is what it
+ * names as its authorization server — so the chain leads to the machine being
+ * replaced. When its documents DO agree with the URL under test, whatever
+ * they point at is the client's genuine next hop and gets scored wherever it
+ * lives.
  */
 function check(name, ok, detail, scope = 'target') {
   results.push({ name, ok, detail, scope });
   if (!ok && scope === 'target') failed++;
 }
 
+/** Raw fetch that yields null instead of throwing. */
+async function fetchOrNull(url, init) {
+  try {
+    return await fetch(url, init);
+  } catch {
+    return null;
+  }
+}
+
+/** Network-level failure as a value. A box that has not finished starting is
+ *  the first thing this gets pointed at on cutover day, and an unhandled
+ *  fetch rejection there reads as a broken script rather than a down server. */
+function unreachable(error) {
+  return `unreachable (${error?.cause?.code || error?.message || error})`;
+}
+
 async function getJson(path) {
-  const res = await fetch(base + path, { headers: { accept: 'application/json' } });
+  let res;
+  try {
+    res = await fetch(base + path, { headers: { accept: 'application/json' } });
+  } catch (error) {
+    return { status: unreachable(error), body: undefined, headers: undefined };
+  }
   const text = await res.text();
   let body;
   try {
@@ -56,6 +87,12 @@ async function getJson(path) {
 // --- health, and the deployed version -------------------------------------
 const health = await getJson('/health');
 check('GET /health is 200', health.status === 200, `status ${health.status}`);
+if (typeof health.status === 'string' && health.status.startsWith('unreachable')) {
+  // Everything below would fail the same way and bury the one fact that matters.
+  console.log(`FAIL  GET /health is 200  — ${health.status}`);
+  console.log(`\n${base} did not answer at all. Nothing else was checked.`);
+  process.exit(1);
+}
 if (expectedVersion) {
   check(
     `/health reports version ${expectedVersion}`,
@@ -77,7 +114,7 @@ if (sessions) {
 }
 
 // --- the 401 has to tell a client where to look ---------------------------
-const unauth = await fetch(base + '/mcp', {
+const unauth = await fetchOrNull(base + '/mcp', {
   method: 'POST',
   headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
   body: JSON.stringify({
@@ -87,9 +124,9 @@ const unauth = await fetch(base + '/mcp', {
     params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'verify', version: '1' } },
   }),
 });
-check('unauthenticated POST /mcp is 401', unauth.status === 401, `status ${unauth.status}`);
+check('unauthenticated POST /mcp is 401', unauth?.status === 401, `status ${unauth?.status ?? 'unreachable'}`);
 
-const challenge = unauth.headers.get('www-authenticate');
+const challenge = unauth?.headers.get('www-authenticate');
 check('401 carries WWW-Authenticate', !!challenge, String(challenge));
 check(
   'challenge names a resource_metadata document',
@@ -219,6 +256,23 @@ for (const { label, body } of [
 
 const offTargetHosts = new Set();
 
+// Does the box agree about where it lives? Compared by origin, so this holds
+// whichever identifier convention the resource document uses for its path.
+// A box reached on a URL it does not believe is its own is the pre-cutover
+// case, and only then does its authorization server point at another machine
+// by accident rather than by design.
+let targetKnowsItsOwnOrigin;
+try {
+  targetKnowsItsOwnOrigin = new URL(originDoc.body?.resource).origin === baseOrigin;
+} catch {
+  targetKnowsItsOwnOrigin = false;
+}
+check(
+  'the target publishes an identifier on the origin it was reached at',
+  targetKnowsItsOwnOrigin,
+  `resource=${originDoc.body?.resource} reached at ${baseOrigin}`
+);
+
 for (const { issuer, labels } of issuerSources.values()) {
   const parsed = parseIssuer(issuer);
   if (parsed.error) {
@@ -228,8 +282,11 @@ for (const { issuer, labels } of issuerSources.values()) {
   }
   check(`authorization server named by ${labels.join(', ')} is a usable https URL`, true, issuer);
 
-  // The decisive question: is this host the deployment we were asked about?
-  const scope = parsed.url.origin === baseOrigin ? 'target' : 'external';
+  // Score it wherever it lives, UNLESS the box does not agree about its own
+  // origin — that is the pre-cutover case, where the chain leads to the
+  // machine being replaced rather than to a deliberate dependency.
+  const sameOrigin = parsed.url.origin === baseOrigin;
+  const scope = sameOrigin || targetKnowsItsOwnOrigin ? 'target' : 'external';
   if (scope === 'external') offTargetHosts.add(parsed.url.origin);
 
   const url = asMetadataUrl(issuer);
@@ -271,10 +328,13 @@ const external = results.filter((r) => r.scope === 'external');
 if (external.length > 0) {
   console.log(
     `\n${external.length} check(s) describe ${[...offTargetHosts].join(', ')} and were NOT counted.\n` +
-      `  Those documents point away from the deployment under test, so their answers\n` +
-      `  say nothing about it. Before a DNS cutover this is expected: the new box\n` +
-      `  advertises the final hostname, which still resolves to the old one.\n` +
-      `  Re-run against the final hostname after propagation to actually gate it.`
+      `  They were excluded because this box does not agree about where it lives:\n` +
+      `  reached at ${baseOrigin}, it publishes ${originDoc.body?.resource} as its own\n` +
+      `  identifier, so the authorization server it names is the machine that\n` +
+      `  hostname currently resolves to — not this one. That is expected before a\n` +
+      `  DNS cutover. Re-run against the final hostname after propagation to gate it.\n` +
+      `  A box whose documents DO agree has its authorization server scored\n` +
+      `  wherever it lives, so a delegated AS still gates the deploy.`
   );
 }
 
