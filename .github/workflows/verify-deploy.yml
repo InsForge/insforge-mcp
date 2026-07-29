@@ -14,7 +14,9 @@ name: Verify Deployed Discovery
 
 on:
   schedule:
-    # Daily, off the hour to avoid the scheduling stampede.
+    # Daily, off the hour to avoid the scheduling stampede. The scheduled run
+    # asserts no version — there is no single correct one on an arbitrary day,
+    # and the script says plainly in its output when that check did not run.
     - cron: '17 6 * * *'
   workflow_dispatch:
     inputs:
@@ -23,9 +25,14 @@ on:
         required: false
         default: 'https://mcp.insforge.dev'
       expected_version:
-        description: 'Version /health must report (optional)'
-        required: false
-        default: ''
+        # Required on purpose. This is the one assertion that catches a
+        # container serving the right name at the wrong build, which is how
+        # production sat 139 days stale while every other check stayed green.
+        # Left optional, a deploy gate silently drops its strongest check.
+        # Read it off the package.json you are deploying — npm latest and
+        # master's version are not the same number.
+        description: 'Version /health must report — from the package.json you are deploying, not npm latest'
+        required: true
 
 jobs:
   verify:
