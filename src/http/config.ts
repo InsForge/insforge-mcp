@@ -10,8 +10,11 @@ program
   .name('insforge-mcp-server')
   .description('HTTP MCP server for Insforge backend-as-a-service')
   .version(PACKAGE_VERSION, '-v, --version')
-  .option('--port <number>', 'Port to run HTTP server on', '3000')
-  .option('--host <string>', 'Host to bind to', '127.0.0.1');
+  // Defaults come from the environment so a container platform's injected
+  // PORT/HOST are honoured. An explicit flag still wins: commander only
+  // applies a default when the flag is absent.
+  .option('--port <number>', 'Port to run HTTP server on', process.env.PORT || '3000')
+  .option('--host <string>', 'Host to bind to', process.env.HOST || '127.0.0.1');
 program.parse(process.argv);
 
 const cliOptions = program.opts();
@@ -21,10 +24,23 @@ const cliOptions = program.opts();
 // ============================================================================
 
 export const SERVER_CONFIG = {
-  /** Port to run HTTP server on */
+  /**
+   * Port to run HTTP server on.
+   *
+   * Sourced from PORT when no flag is given — every container platform assigns
+   * one that way and nothing here was reading it, so a hosted deploy bound
+   * 3000 regardless of what it had been told to use.
+   */
   port: parseInt(cliOptions.port) || 3000,
 
-  /** Host to bind to */
+  /**
+   * Host to bind to.
+   *
+   * Stays loopback unless asked otherwise: a locally-run binary should not be
+   * reachable from the network. A container opts in with --host 0.0.0.0 or
+   * HOST, which the start script does explicitly so it is visible rather than
+   * implied.
+   */
   host: cliOptions.host || '127.0.0.1',
 
   /** Public URL of this MCP server */
