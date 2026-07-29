@@ -237,7 +237,14 @@ export async function registerInsforgeTools(host: ToolHost, config: ToolsConfig 
   }
 
   const getApiKey = (toolApiKey?: string): string => {
-    const apiKey = toolApiKey?.trim() || GLOBAL_API_KEY;
+    // The per-call apiKey argument exists for the self-hosted stdio mode, where
+    // the caller legitimately supplies its own credential. In remote mode the
+    // credential is bound to the session at sign-in, and honouring a
+    // caller-supplied one would mean the session credential is not
+    // authoritative — an agent could substitute any key it happens to know.
+    // The fixed per-session base URL keeps that inside one project, so this is
+    // not cross-project access, but it is still an override nobody needs here.
+    const apiKey = (isRemote ? undefined : toolApiKey?.trim()) || GLOBAL_API_KEY;
     if (!apiKey) {
       throw new Error('API key is required. Pass --api_key when starting the MCP server.');
     }
