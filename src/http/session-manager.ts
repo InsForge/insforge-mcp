@@ -38,6 +38,10 @@ interface RuntimeSession {
   server: McpServer;
   transport: StreamableHTTPServerTransport | SSEServerTransport;
   transportType: 'streamable' | 'sse';
+  // Last time this process saw real client traffic for the session, on the
+  // monotonic clock. Tracked in memory because it is the only record of
+  // activity that survives Redis losing its data — see selectOrphanedSessions.
+  lastSeenAt: number;
 }
 
 // Redis key prefix
@@ -45,6 +49,30 @@ const SESSION_KEY_PREFIX = 'mcp:session:';
 
 // Session TTL in seconds (24 hours)
 const SESSION_TTL = 24 * 60 * 60;
+
+// Session TTL in milliseconds, for comparison against in-memory timestamps.
+export const SESSION_TTL_MS = SESSION_TTL * 1000;
+
+/**
+ * Clock for in-memory session ages.
+ *
+ * Deliberately monotonic rather than Date.now(). These timestamps are only
+ * ever compared against each other to measure elapsed time, never against
+ * anything Redis stores, so wall-clock accuracy buys nothing — while a
+ * forward clock step (NTP correction, a VM resuming from suspend) would age
+ * every live session past its TTL at once and hand the sweep the exact
+ * conclusion this gate exists to prevent. CLOCK_MONOTONIC can only lag real
+ * elapsed time, which errs toward holding a session too long.
+ */
+export function monotonicNow(): number {
+  return performance.now();
+}
+
+/** The sweep's view of one runtime session. */
+export interface SweepCandidate {
+  sessionId: string;
+  lastSeenAt: number;
+}
 
 /**
  * Pick the runtime sessions that no longer have a Redis record.
@@ -57,9 +85,29 @@ const SESSION_TTL = 24 * 60 * 60;
  * `exists` is the pipelined EXISTS reply for the matching id. A missing or
  * failed reply counts as alive: a transient Redis error must never be read as
  * "reap this live session".
+ *
+ * A missing record is necessary but not sufficient. Redis can also come back
+ * empty — a restart without persistence, a failover to a cold replica, an
+ * eviction — and then every resident session reads as an orphan at once, so
+ * the sweep would close connections that are actively serving traffic.
+ * touchSession cannot repair that: it only rewrites a record it can still
+ * read, so a wiped record stays wiped no matter how busy the client is.
+ *
+ * The in-memory clock settles it. A record only expires SESSION_TTL after the
+ * last touch, and that same touch stamps lastSeenAt, so the two cross at the
+ * same instant during normal operation and this gate costs no reap latency.
+ * They diverge in exactly one case: Redis lost a record early. Then the
+ * session we saw traffic on minutes ago is held, and one genuinely abandoned
+ * is still collected on schedule.
  */
-export function selectOrphanedSessions(sessionIds: string[], exists: number[]): string[] {
-  return sessionIds.filter((_, i) => exists[i] === 0);
+export function selectOrphanedSessions(
+  sessions: SweepCandidate[],
+  exists: number[],
+  now: number = monotonicNow()
+): string[] {
+  return sessions
+    .filter((session, i) => exists[i] === 0 && now - session.lastSeenAt >= SESSION_TTL_MS)
+    .map((session) => session.sessionId);
 }
 
 /**
@@ -124,7 +172,7 @@ export class SessionManager {
     );
 
     // Store runtime instances in memory
-    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'streamable' });
+    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'streamable', lastSeenAt: monotonicNow() });
 
     console.log(`[SessionManager] Session created: ${sessionId}`);
     return server;
@@ -226,7 +274,7 @@ export class SessionManager {
     await server.connect(transport);
 
     // Store runtime instances in memory
-    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'streamable' });
+    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'streamable', lastSeenAt: monotonicNow() });
 
     // Update last accessed time
     await this.touchSession(sessionId);
@@ -284,7 +332,7 @@ export class SessionManager {
     );
 
     // Store runtime instances in memory
-    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'sse' });
+    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'sse', lastSeenAt: monotonicNow() });
 
     console.log(`[SessionManager] SSE session created: ${sessionId}`);
     return server;
@@ -295,6 +343,15 @@ export class SessionManager {
    */
   async touchSession(sessionId: string): Promise<void> {
     const redis = getRedisClient();
+
+    // Stamp memory first and unconditionally. The Redis write below is a
+    // no-op when the record is already gone, so this is the only evidence of
+    // activity that outlives Redis losing its data.
+    const runtime = this.runtimeSessions.get(sessionId);
+    if (runtime) {
+      runtime.lastSeenAt = monotonicNow();
+    }
+
     const sessionData = await this.getSessionData(sessionId);
 
     if (sessionData) {
@@ -342,31 +399,41 @@ export class SessionManager {
     // path refreshes the record, so it lapses at SESSION_TTL from creation
     // whether or not the client is active, and the keepalive means such a
     // connection is still open when it does.
-    const sessionIds = Array.from(this.runtimeSessions.entries())
+    const candidates: SweepCandidate[] = Array.from(this.runtimeSessions.entries())
       .filter(([, session]) => session.transportType === 'streamable')
-      .map(([sessionId]) => sessionId);
-    if (sessionIds.length === 0) {
+      .map(([sessionId, session]) => ({ sessionId, lastSeenAt: session.lastSeenAt }));
+    if (candidates.length === 0) {
       return 0;
     }
 
     const redis = getRedisClient();
     const pipeline = redis.pipeline();
-    for (const sessionId of sessionIds) {
+    for (const { sessionId } of candidates) {
       pipeline.exists(SESSION_KEY_PREFIX + sessionId);
     }
     const replies = await pipeline.exec();
 
     // A failed or absent reply is treated as "still alive" so a Redis blip
     // can't take out live sessions.
-    const exists = sessionIds.map((_, i) => {
+    const exists = candidates.map((_, i) => {
       const reply = replies?.[i];
       if (!reply || reply[0]) return 1;
       return Number(reply[1]);
     });
 
-    const orphaned = selectOrphanedSessions(sessionIds, exists);
+    const orphaned = selectOrphanedSessions(candidates, exists);
     for (const sessionId of orphaned) {
       await this.deleteSession(sessionId);
+    }
+
+    // Records gone while the session is still inside its TTL means Redis lost
+    // data rather than expired it. Worth a line in the log: these sessions
+    // survive the sweep but their records will not come back on their own.
+    const heldBack = exists.filter((e) => e === 0).length - orphaned.length;
+    if (heldBack > 0) {
+      console.warn(
+        `[SessionManager] ${heldBack} session(s) lost their Redis record before TTL — holding them; check Redis for a restart, failover or eviction`
+      );
     }
 
     if (orphaned.length > 0) {
