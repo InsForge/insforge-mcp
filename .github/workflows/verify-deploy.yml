@@ -30,10 +30,14 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -41,7 +45,11 @@ jobs:
           node-version: 'lts/*'
 
       - name: Verify deployed discovery
-        run: |
-          node scripts/verify-deploy.mjs \
-            "${{ github.event.inputs.url || 'https://mcp.insforge.dev' }}" \
-            ${{ github.event.inputs.expected_version }}
+        # Inputs go through env, never into the shell command. A dispatch input
+        # is attacker-controllable in the sense that anyone who can trigger the
+        # workflow chooses it, and interpolating it directly would let it
+        # terminate the quoting and run arbitrary shell.
+        env:
+          DEPLOY_URL: ${{ github.event.inputs.url || 'https://mcp.insforge.dev' }}
+          EXPECTED_VERSION: ${{ github.event.inputs.expected_version }}
+        run: node scripts/verify-deploy.mjs "$DEPLOY_URL" "$EXPECTED_VERSION"

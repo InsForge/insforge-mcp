@@ -68,8 +68,22 @@ describe('buildResourceChallenge', () => {
     );
   });
 
-  it('does not produce a double slash', () => {
-    expect(buildResourceChallenge('/mcp', BASE)).not.toContain('//.well-known');
+  // The previous version of this test passed BASE (no trailing slash) and so
+  // asserted a guarantee it never exercised. Feed it the input that actually
+  // breaks: a configured URL ending in "/".
+  it.each([`${BASE}/`, `${BASE}//`])('normalises a trailing slash on %j', (configured) => {
+    expect(buildResourceChallenge('/mcp', configured)).toBe(
+      `Bearer resource_metadata="${BASE}/.well-known/oauth-protected-resource/mcp"`
+    );
+  });
+
+  it('keeps the document self-consistent when the base has a trailing slash', () => {
+    // If only one of the two normalised, the client would fetch a document
+    // whose `resource` disagreed with the URL it came from — RFC 9728 §3.3
+    // says discard it, so the mismatch would be silent and fatal.
+    const url = protectedResourceMetadataUrl('/mcp', `${BASE}/`);
+    const doc = protectedResourceMetadata('/mcp', `${BASE}/`);
+    expect(url.replace('/.well-known/oauth-protected-resource', '')).toBe(doc.resource);
   });
 });
 

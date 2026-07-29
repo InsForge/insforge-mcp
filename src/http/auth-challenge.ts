@@ -10,11 +10,21 @@ import { SERVER_CONFIG, OAUTH_ENDPOINTS } from './config.js';
  * `https://host/.well-known/oauth-protected-resource/mcp` — not at the bare
  * well-known path. Pass `''` for the origin itself.
  */
+/**
+ * A configured public URL with a trailing slash would otherwise produce
+ * `https://host//.well-known/...`, which no route matches and which a client
+ * cannot reconcile with the document it receives. Normalise once, here, so
+ * every derived URL and every `resource` value agrees.
+ */
+function origin(publicUrl: string): string {
+  return publicUrl.replace(/\/+$/, '');
+}
+
 export function protectedResourceMetadataUrl(
   resourcePath = '',
   publicUrl: string = SERVER_CONFIG.publicUrl
 ): string {
-  return `${publicUrl}${OAUTH_ENDPOINTS.protectedResource}${resourcePath}`;
+  return `${origin(publicUrl)}${OAUTH_ENDPOINTS.protectedResource}${resourcePath}`;
 }
 
 /**
@@ -31,7 +41,7 @@ export function protectedResourceMetadata(
   publicUrl: string = SERVER_CONFIG.publicUrl
 ): Record<string, unknown> {
   return {
-    resource: `${publicUrl}${resourcePath}`,
+    resource: `${origin(publicUrl)}${resourcePath}`,
     authorization_servers: [publicUrl],
     scopes_supported: ['mcp:read', 'mcp:write'],
   };
