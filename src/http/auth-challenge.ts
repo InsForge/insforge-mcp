@@ -2,15 +2,6 @@ import type { Response } from 'express';
 import { SERVER_CONFIG, OAUTH_ENDPOINTS } from './config.js';
 
 /**
- * Where the protected-resource metadata for a given endpoint lives.
- *
- * RFC 9728 §3.1 builds the metadata URL by inserting the well-known path
- * *between the host and the resource's path*, so the document describing
- * `https://host/mcp` lives at
- * `https://host/.well-known/oauth-protected-resource/mcp` — not at the bare
- * well-known path. Pass `''` for the origin itself.
- */
-/**
  * A configured public URL with a trailing slash would otherwise produce
  * `https://host//.well-known/...`, which no route matches and which a client
  * cannot reconcile with the document it receives. Normalise once, here, so
@@ -20,6 +11,15 @@ function origin(publicUrl: string): string {
   return publicUrl.replace(/\/+$/, '');
 }
 
+/**
+ * Where the protected-resource metadata for a given endpoint lives.
+ *
+ * RFC 9728 §3.1 builds the metadata URL by inserting the well-known path
+ * *between the host and the resource path*, so the document describing
+ * https://host/mcp lives at
+ * https://host/.well-known/oauth-protected-resource/mcp — not at the bare
+ * well-known path. Pass an empty string for the origin itself.
+ */
 export function protectedResourceMetadataUrl(
   resourcePath = '',
   publicUrl: string = SERVER_CONFIG.publicUrl
@@ -42,7 +42,7 @@ export function protectedResourceMetadata(
 ): Record<string, unknown> {
   return {
     resource: `${origin(publicUrl)}${resourcePath}`,
-    authorization_servers: [publicUrl],
+    authorization_servers: [origin(publicUrl)],
     scopes_supported: ['mcp:read', 'mcp:write'],
   };
 }
