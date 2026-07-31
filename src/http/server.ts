@@ -390,6 +390,29 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
     });
   }
 
+  if (!code_challenge) {
+    // Refused HERE, not at the end.
+    //
+    // #91 made authorization codes stateless, which means they cannot be
+    // single-use, which means PKCE is what stops a replay. I put the refusal in
+    // createAuthorizationCode — and measured on the slug that a client without
+    // PKCE still gets a 302, signs in through the browser, picks a project, and
+    // only THEN fails. The person did all the work before we told them we were
+    // never going to accept it.
+    //
+    // That is the same mistake as validating a redirect_uri at authorize
+    // instead of at registration: reject where the caller is listening, not
+    // where only a browser can see it. The MCP client reads this response; it
+    // never reads the one at the end of the flow.
+    return sendOAuthError(req, res, 400, {
+      error: 'invalid_request',
+      error_description:
+        'code_challenge is required. This server advertises S256 as its only ' +
+        'code_challenge_method and issues authorization codes that carry their own state, ' +
+        'so PKCE is what makes a code safe to accept.',
+    });
+  }
+
   if (response_type !== 'code') {
     return sendOAuthError(req, res, 400, {
       error: 'unsupported_response_type',
