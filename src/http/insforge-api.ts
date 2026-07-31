@@ -97,6 +97,27 @@ export class InsforgeApiError extends Error {
 const PLATFORM_TIMEOUT_MS = 10_000;
 
 /**
+ * The platform has TWO path families, and guessing costs you a 404.
+ *
+ * Measured against api.insforge.dev rather than inferred from the neighbours:
+ *
+ *   /auth/v1/profile         401   <- reachable      /api/auth/v1/profile      404
+ *   /api/oauth/v1/revoke     401   <- reachable      /oauth/v1/revoke          404
+ *
+ * So user/org/project routes sit at the root and the OAuth routes sit under
+ * `/api`. I got this wrong writing revokePlatformToken — it called
+ * `/oauth/v1/revoke`, which 404s, so the revoke would have failed every single
+ * time against the real platform while passing every local test.
+ *
+ * It passed because my stub matched `req.url.includes('/oauth/v1/revoke')`,
+ * which is true of both paths. A stub that substring-matches cannot catch a
+ * path error; the only thing that could was asking the real host. Hence this
+ * constant, so the two families are named once instead of being retyped per
+ * call site.
+ */
+const OAUTH_API_BASE = `${INSFORGE_API_BASE}/api/oauth/v1`;
+
+/**
  * Every outbound call to the platform goes through this, so a new one cannot be
  * added without a bound. That is the actual defect being fixed: not a missing
  * timeout in one place, but six places each free to forget.
@@ -246,7 +267,7 @@ export async function getProjectApiKey(token: string, projectId: string): Promis
  * revocation means, and it must not be reported to anyone as success.
  */
 export async function revokePlatformToken(token: string, clientId: string): Promise<void> {
-  const response = await platformFetch(`${INSFORGE_API_BASE}/oauth/v1/revoke`, {
+  const response = await platformFetch(`${OAUTH_API_BASE}/revoke`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -260,6 +281,73 @@ export async function revokePlatformToken(token: string, clientId: string): Prom
     const errorText = await response.text();
     throw new InsforgeApiError(
       `Failed to revoke platform token: ${errorText}`,
+      response.status
+    );
+  }
+}
+
+export interface PlatformTokens {
+  access_token?: string;
+  refresh_token?: string;
+  token_type?: string;
+  expires_in?: number;
+  error?: string;
+  error_description?: string;
+}
+
+/**
+ * Exchange an authorization code for platform tokens.
+ *
+ * This lived in server.ts, doing its own bare `fetch`, and that placement was
+ * the whole defect rather than an accident of style. When I wrapped the calls
+ * in this file with a timeout I wrote "every outbound call to the platform goes
+ * through this" — true of this file, false of the server, and this is the call
+ * it missed. Iris found it by forcing the platform unroutable on a branch env:
+ *
+ *   platform reachable    callback -> 400 invalid_grant     (the platform's answer)
+ *   platform unroutable   callback -> 500 "fetch failed"    no Retry-After
+ *
+ * `fetch failed` is Node's raw message rendered to whoever is looking, and this
+ * is the ONE upstream call that renders in a human's browser mid-sign-in. So it
+ * was both the least classified and the most visible.
+ *
+ * Moving it here rather than adding a timeout where it stood: a call that lives
+ * beside its siblings inherits their bound automatically, and the next person
+ * adding a platform call finds them all in one file. The fix for "six places
+ * free to forget" cannot itself be a seventh place to remember.
+ *
+ * Throws InsforgeApiError for a platform response we could not read, and
+ * returns the parsed body otherwise — INCLUDING an OAuth error body, because
+ * `invalid_grant` is the platform answering, not a failure to reach it. The
+ * caller needs those two apart.
+ */
+export async function exchangePlatformCode(params: {
+  code: string;
+  redirectUri: string;
+  clientId: string;
+  clientSecret: string;
+  codeVerifier: string;
+}): Promise<PlatformTokens> {
+  const response = await platformFetch(`${OAUTH_API_BASE}/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      grant_type: 'authorization_code',
+      code: params.code,
+      redirect_uri: params.redirectUri,
+      client_id: params.clientId,
+      client_secret: params.clientSecret,
+      code_verifier: params.codeVerifier,
+    }),
+  });
+
+  try {
+    return (await response.json()) as PlatformTokens;
+  } catch {
+    // A response we cannot parse is not the platform declining — it is the
+    // platform, or something between us and it, not answering properly.
+    throw new InsforgeApiError(
+      `Token exchange returned an unreadable response (HTTP ${response.status})`,
       response.status
     );
   }
