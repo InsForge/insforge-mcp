@@ -132,3 +132,20 @@ describe('sendUnauthorized', () => {
     expect(order).toEqual(['header', 'body']);
   });
 });
+
+describe('normaliseBaseUrl', () => {
+  it('strips trailing slashes so no consumer has to', async () => {
+    // Guarding the two consumers I first noticed left eight others — the AS
+    // metadata, the OAuth callback registered with the platform, the
+    // project-selection redirect, two authorize URLs in error bodies, the
+    // projects URL and the banner. Express matches none of those routes with
+    // a doubled slash.
+    const { normaliseBaseUrl } = await import('./config.js');
+
+    expect(normaliseBaseUrl('https://mcp.insforge.dev/')).toBe('https://mcp.insforge.dev');
+    expect(normaliseBaseUrl('https://mcp.insforge.dev///')).toBe('https://mcp.insforge.dev');
+    expect(normaliseBaseUrl('https://mcp.insforge.dev')).toBe('https://mcp.insforge.dev');
+    // A path-bearing base keeps its path, loses only the trailing slash.
+    expect(normaliseBaseUrl('https://host/base/')).toBe('https://host/base');
+  });
+});
