@@ -205,18 +205,19 @@ export class OAuthManager {
     // Validate token and get user info
     const user = await validateToken(token);
 
-    // Get project access info
+    // Still called for its refusal, not for its return value: this is where we
+    // find out the signed-in user may actually reach the project they picked.
+    // Everything it returns beyond the id is re-fetched per request through the
+    // project-key cache, so none of it is sealed into the token — see
+    // access-token.ts for why a caller-influenced field in there is a denial of
+    // service against everyone who shares the project.
     const projectAccess = await getProjectAccess(token, projectId);
 
     const accessToken = issueAccessToken(
       {
         userId: user.id,
-        userEmail: user.email,
         platformAccessToken: token,
         projectId: projectAccess.projectId,
-        projectName: projectAccess.projectName,
-        organizationId: projectAccess.organizationId,
-        accessHost: projectAccess.accessHost,
       },
       accessTokenKey()
     );

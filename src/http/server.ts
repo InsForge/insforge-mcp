@@ -885,13 +885,19 @@ app.post(API_ENDPOINTS.bindProject, async (req: Request, res: Response) => {
     if (payload.projectId === projectId) {
       // Already there. Idempotent rather than an error: a client retrying is
       // not making a mistake.
+      //
+      // The id and nothing else. This used to echo the project's name and
+      // organization out of the token, and those two fields are exactly what
+      // made the sealed payload unbounded — a project name has no maximum
+      // length upstream. They are display data, so they left the credential
+      // (access-token.ts) rather than staying in it to serve one response body.
+      //
+      // Re-fetching them here to keep the shape was the tempting move and the
+      // wrong one: it would put a platform round-trip, and a platform outage,
+      // in the path of an endpoint that answers purely from the token today.
       return res.json({
         success: true,
-        project: {
-          id: payload.projectId,
-          name: payload.projectName,
-          organizationId: payload.organizationId,
-        },
+        project: { id: payload.projectId },
         message: 'This token is already scoped to that project.',
       });
     }

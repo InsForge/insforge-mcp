@@ -28,10 +28,43 @@ import { sealAuthState, openAuthState, InvalidAuthStateError } from './auth-stat
  * seconds and not "until exp".
  */
 
+/**
+ * EVERY FIELD IN HERE IS PLATFORM-ISSUED AND BOUNDED. That is a property to
+ * preserve, not a coincidence, and it was not true when this file was first
+ * written.
+ *
+ * The first version also carried `projectName`, `organizationId`, `accessHost`
+ * and `userEmail`. Max found the hole in `projectName`: cloud-backend's
+ * `createProjectSchema` is `z.string().trim().min(2)` — a `.min` with no
+ * `.max` — so a project name is unbounded, and it rode inside every token
+ * issued for that project. A 10k-character name mints a token no
+ * `Authorization` header will carry, and the person who breaks it need not be
+ * the person who named it: one org member names the project, every member who
+ * selects it gets an unusable token.
+ *
+ * Dropping it cost nothing, which is the part worth recording. Those four
+ * fields were WRITTEN here and read almost nowhere:
+ *
+ *   projectName · organizationId · accessHost   re-fetched by
+ *                                               resolveProjectFromToken anyway,
+ *                                               which reads them off the
+ *                                               project-key cache, never off
+ *                                               the payload
+ *   userEmail                                   written at issue, read by
+ *                                               nothing at all
+ *
+ * So the seal was carrying four values for the benefit of one informational
+ * field in one endpoint's response body. Same reasoning as keeping the project
+ * API key out: display data that can be re-fetched does not belong in a
+ * credential.
+ *
+ * The rule for anyone adding a field: it must be platform-issued and bounded,
+ * or it does not go in. A caller-influenced string in here is a denial of
+ * service against everyone who shares the resource it names.
+ */
 export interface AccessTokenPayload {
   /** Who this is, from the platform at login. */
   userId: string;
-  userEmail: string;
 
   /**
    * The platform access token.
@@ -46,9 +79,6 @@ export interface AccessTokenPayload {
   /** The project chosen at sign-in. A per-call or per-URL project replaces
    *  this later; it is here now so nothing else has to change at once. */
   projectId: string;
-  projectName: string;
-  organizationId: string;
-  accessHost: string;
 }
 
 /**
@@ -61,12 +91,58 @@ export interface AccessTokenPayload {
  */
 export const ACCESS_TOKEN_TTL_SECONDS = 24 * 60 * 60;
 
+/**
+ * The longest token we will hand out — the belt to go with the braces above.
+ *
+ * The payload is bounded by construction now, so this should never fire. It
+ * exists because that sentence has been wrong three times today: a client id, a
+ * sealed state and this token were each "bounded" until a field turned out not
+ * to be. The one remaining variable-length value in here is the platform's own
+ * access token, which is not ours to bound.
+ *
+ * The number comes from measurements rather than from a round constant. Iris
+ * drove the real chain — Cloudflare, the Fly proxy, Node's 16KB default — with
+ * a synthetic bearer, and the rest is this seal measured directly:
+ *
+ *   15512 chars   accepted by the whole chain
+ *   15573 chars   431 Request Header Fields Too Large
+ *    1483 chars   what the old payload minted
+ *   ~1250 chars   what this payload mints (the four dropped fields cost 233)
+ *
+ * So 4096 is ~3.3x the real token, and it is reached when the PLATFORM's own
+ * token passes ~2950 characters — roughly 3.8x its size today. Far enough away
+ * that tripping this means something changed that someone should look at, and
+ * far enough below 15512 that the refusal happens here, where it is explained,
+ * rather than at a proxy that will not say why.
+ *
+ * It THROWS rather than truncating or warning, and the failure lands at
+ * sign-in: the callback's error handler turns it into the OAuth error page, so
+ * a person sees "something went wrong on our side" at the moment it went wrong.
+ * The alternative is worse in the way that is hard to debug — a token that
+ * every proxy in the chain silently refuses to carry, surfacing later as a
+ * client that cannot connect for reasons nothing logs.
+ */
+export const MAX_ACCESS_TOKEN_LENGTH = 4096;
+
 export function issueAccessToken(
   payload: AccessTokenPayload,
   key: Buffer,
   nowMs: number = Date.now()
 ): string {
-  return sealAuthState(payload, key, nowMs, ACCESS_TOKEN_TTL_SECONDS);
+  const token = sealAuthState(payload, key, nowMs, ACCESS_TOKEN_TTL_SECONDS);
+
+  if (token.length > MAX_ACCESS_TOKEN_LENGTH) {
+    // Deliberately does not print the token or the payload: this is the most
+    // valuable envelope we issue and a length is enough to act on.
+    throw new Error(
+      `Refusing to issue an access token of ${token.length} characters ` +
+        `(limit ${MAX_ACCESS_TOKEN_LENGTH}). A token this size will be rejected by proxies ` +
+        'in the request path, so issuing it would produce a client that cannot connect and ' +
+        'no explanation. Something has been added to the sealed payload that is not bounded.'
+    );
+  }
+
+  return token;
 }
 
 /**
