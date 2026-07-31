@@ -185,22 +185,30 @@ check(
   `got ${health.body?.version}`
 );
 
-// Runtime sessions should not run away from the ones Redis still holds. A
-// small excess is normal in-flight; an order of magnitude is the leak.
-// `activeSessions` is null when the server is running without Redis, which is
-// not a failure — there is simply no second number to compare against, and a
-// default of 0 would silently turn "unknown" into "zero active" and grade a
-// real leak against it.
+// Sessions against the heap, NOT against each other.
+//
+// This used to compare resident sessions to the count Redis held, on the theory
+// that instances piling up behind expired records was the leak. With one store
+// those two numbers are the same number, so that check can no longer fail —
+// and a check that cannot fail is worse than no check, because it reads as
+// coverage in a green run.
+//
+// What can still fail is the thing that actually kills the process. Sessions
+// are held only in memory now and only the idle sweep removes them, so the
+// question is how much heap they are using: measured at roughly 252 kB each
+// against this machine's ~493 MB limit, about 2,000 is fatal. Grading the heap
+// percentage catches a stalled sweep, a leak with some other cause, and plain
+// undersizing — none of which the old ratio would have noticed.
 const sessions = health.body?.sessions;
-if (sessions && typeof sessions.activeSessions === 'number') {
-  const { activeSessions: active, memorySessionCount: resident = 0 } = sessions;
+const memory = health.body?.memory;
+if (memory && typeof memory.heapUsedPct === 'number') {
   check(
-    'resident sessions are not far above active ones',
-    resident <= Math.max(active * 2, active + 50),
-    `active=${active} resident=${resident}`
+    'heap is not close to the limit',
+    memory.heapUsedPct < 80,
+    `heapUsed=${memory.heapUsedMb}MB limit=${memory.heapLimitMb}MB (${memory.heapUsedPct}%), resident sessions=${sessions?.memorySessionCount ?? 'unknown'}`
   );
-} else if (sessions) {
-  console.log('  ~ session ratio not checked: no Redis, so there is no active count');
+} else {
+  console.log('  ~ heap not checked: /health reported no memory block');
 }
 
 // --- the 401 has to tell a client where to look ---------------------------
