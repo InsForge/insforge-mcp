@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { createHmac } from 'crypto';
 import {
   mintClientId,
   readClientId,
@@ -235,5 +236,67 @@ describe('isAcceptableRedirectUri', () => {
     for (const bad of [undefined, null, 42, ['https://app.example/cb'], {}]) {
       expect(isAcceptableRedirectUri(bad)).toBe(false);
     }
+  });
+});
+
+describe('the id itself is bounded, not just its parts', () => {
+  // Max's P1 on the wiring PR: every field was bounded and their product was
+  // not. 10 x 2048 plus a 256-char name is legal under all three per-field
+  // bounds and mints a 27807-character id — which registers 201 and then comes
+  // back 431 from authorize. The comment above the constants described that
+  // exact failure while the constants permitted it.
+  const maxUris = Array.from(
+    { length: 10 },
+    (_, i) => `https://app.example/${i}${'c'.repeat(2027)}`
+  );
+
+  it('rejects a registration whose per-field bounds all pass', () => {
+    for (const uri of maxUris) {
+      expect(isAcceptableRedirectUri(uri)).toBe(true); // each field is legal
+    }
+    expect(() =>
+      mintClientId({ redirect_uris: maxUris, client_name: 'x'.repeat(256) }, SECRET)
+    ).toThrow(InvalidRegistrationError);
+  });
+
+  it('says how big it was, so the client can act on it', () => {
+    expect(() => mintClientId({ redirect_uris: maxUris }, SECRET)).toThrow(/27\d{3}-character/);
+  });
+
+  it('still mints what real clients send', () => {
+    // Realistic is 198 characters; a generous four-URI registration is 1586.
+    const realistic = mintClientId(
+      { redirect_uris: ['cursor://anysphere.cursor-retrieval/oauth/callback'], client_name: 'Cursor' },
+      SECRET
+    );
+    expect(realistic.length).toBeLessThan(500);
+
+    const generous = mintClientId(
+      {
+        redirect_uris: Array.from({ length: 4 }, (_, i) => `https://app.example/${i}${'c'.repeat(235)}`),
+        client_name: 'x'.repeat(64),
+      },
+      SECRET
+    );
+    expect(generous.length).toBeLessThan(4096);
+  });
+
+  it('does not enforce the bound on read, so tightening it later is safe', () => {
+    // readClientId must never re-check this. If it did, lowering the limit
+    // would invalidate every id already issued at the old one — the failure
+    // mode that made the 30-day registration TTL so expensive.
+    const oversized = 'a'.repeat(5000);
+    const id = mintClientId({ redirect_uris: ['https://app.example/cb'] }, SECRET);
+    expect(id.length).toBeLessThan(4096);
+    expect(oversized.length).toBeGreaterThan(4096);
+
+    // Hand-build an id longer than the mint bound and prove it still reads.
+    const payload = Buffer.from(
+      JSON.stringify({ redirect_uris: [`https://app.example/${'c'.repeat(4000)}`], iat: 1 })
+    ).toString('base64url');
+    const sig = createHmac('sha256', SECRET).update(payload).digest('base64url');
+    const longId = `mcp_${payload}.${sig}`;
+    expect(longId.length).toBeGreaterThan(4096);
+    expect(readClientId(longId, SECRET).redirect_uris).toHaveLength(1);
   });
 });

@@ -56,6 +56,30 @@ const MAX_URI_LENGTH = 2048;
 const MAX_CLIENT_NAME_LENGTH = 256;
 
 /**
+ * And a bound on the id itself, which is the only one of these that is actually
+ * about the URL.
+ *
+ * The per-field bounds above never constrained their product: 10 x 2048 plus a
+ * 256-character name is a legal registration under every one of them, and it
+ * mints a 27807-character client id. Measured, not reasoned about — that
+ * registration returns 201 and the authorize request it produces is 29944
+ * characters and comes back 431 Request Header Fields Too Large. Node's default
+ * max-http-header-size is 16384 and the request line counts toward it; nginx in
+ * front cuts the request line at 8192. So the comment above described this
+ * exact failure and the constants permitted it.
+ *
+ * 4096 is chosen from the same arithmetic rather than by feel: the worst
+ * authorize request line is this id plus an encoded redirect_uri plus about 150
+ * characters of other parameters, so 4096 stays inside the 8192 that fails
+ * first, with room. A realistic registration mints 198.
+ *
+ * Checked at mint only, deliberately. `readClientId` does not re-check it, so
+ * tightening this number later cannot invalidate ids already issued — the
+ * failure mode that made the 30-day TTL so expensive.
+ */
+const MAX_CLIENT_ID_LENGTH = 4096;
+
+/**
  * Schemes we will not carry in a registration.
  *
  * The authorize endpoint redirects to whatever the registration names, so this
@@ -166,7 +190,22 @@ export function mintClientId(
     iat: now,
   };
   const payload = Buffer.from(JSON.stringify(full)).toString('base64url');
-  return `${PREFIX}${payload}.${sign(payload, secret)}`;
+  const clientId = `${PREFIX}${payload}.${sign(payload, secret)}`;
+
+  // Measure the thing that actually travels. One check on the finished id
+  // cannot drift out of sync with the per-field bounds the way a fourth
+  // per-field bound would, and it is the only one whose units match the limit
+  // that fails — bytes on a request line.
+  if (clientId.length > MAX_CLIENT_ID_LENGTH) {
+    throw new InvalidRegistrationError(
+      `this registration mints a ${clientId.length}-character client_id, over the ` +
+        `${MAX_CLIENT_ID_LENGTH} limit. The client_id travels in every authorize URL, ` +
+        'so an oversized one is rejected by the server or a proxy before it is read. ' +
+        'Register fewer or shorter redirect_uris.'
+    );
+  }
+
+  return clientId;
 }
 
 /**
