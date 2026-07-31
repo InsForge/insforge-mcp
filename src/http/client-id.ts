@@ -262,16 +262,71 @@ export function readClientId(clientId: string, secret: string): ClientRegistrati
 }
 
 /**
+ * A loopback IP literal, per RFC 8252 §7.3.
+ *
+ * `localhost` is deliberately excluded. §8.3 says a native client should use
+ * the IP literal precisely because `localhost` resolves through DNS and the
+ * hosts file, so it can be pointed somewhere that is not the loopback
+ * interface. The platform's `matchRedirectUri` draws the line in the same
+ * place, and the two servers agreeing is worth more here than the extra
+ * leniency would be.
+ */
+function isLoopbackIpLiteral(hostname: string): boolean {
+  return hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
+}
+
+/**
  * Is this redirect_uri one the client registered?
  *
- * Exact string match, per RFC 6749 §3.1.2.3. No prefix or origin matching:
- * those are the relaxations that turn a redirect_uri check into an open
- * redirect, and an open redirect on an authorization endpoint is
- * authorization-code theft.
+ * Exact string match, per RFC 6749 §3.1.2.3 — with the one relaxation RFC 8252
+ * §7.3 requires and no others. No prefix matching and no origin matching: those
+ * are what turn a redirect_uri check into an open redirect, and an open
+ * redirect on an authorization endpoint is authorization-code theft.
+ *
+ * The exception is loopback. A native client binds an ephemeral port, so the
+ * port it registers is not the port it will be listening on next time, and an
+ * exact match rejects it. Concretely: register on 127.0.0.1:54321, restart,
+ * bind 61999, and the MCP SDK sends the cached client_id with the new port —
+ * it re-registers only when it holds no client information at all
+ * (`client/auth.js:226`), and never in response to an authorize-time rejection.
+ * So the user gets the re-add page on every restart, with nothing they can do
+ * about it.
+ *
+ * For loopback IP literals the port is ignored and scheme, hostname, path and
+ * query must all still match exactly. Everything else keeps exact match,
+ * including the port. This mirrors the platform's `matchRedirectUri`
+ * (`src/utils/oauth.ts:386`) rather than inventing a second dialect —
+ * flattening that function to `includes()` is what would have broken
+ * `insforge login`, whose CLI binds `server.listen(0, '127.0.0.1')`.
  */
 export function isRegisteredRedirectUri(
   registration: ClientRegistration,
   redirectUri: unknown
 ): boolean {
-  return typeof redirectUri === 'string' && registration.redirect_uris.includes(redirectUri);
+  if (typeof redirectUri !== 'string') return false;
+  if (registration.redirect_uris.includes(redirectUri)) return true;
+
+  let requested: URL;
+  try {
+    requested = new URL(redirectUri);
+  } catch {
+    return false;
+  }
+  if (!isLoopbackIpLiteral(requested.hostname)) return false;
+
+  return registration.redirect_uris.some((registered) => {
+    let candidate: URL;
+    try {
+      candidate = new URL(registered);
+    } catch {
+      return false;
+    }
+    return (
+      isLoopbackIpLiteral(candidate.hostname) &&
+      candidate.protocol === requested.protocol &&
+      candidate.hostname === requested.hostname &&
+      candidate.pathname === requested.pathname &&
+      candidate.search === requested.search
+    );
+  });
 }

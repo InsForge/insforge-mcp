@@ -96,10 +96,18 @@ describe('redirect_uri matching', () => {
       'http://127.0.0.1:8765',
       'https://app.example/cb?next=https://attacker.example',
       'https://app.example.attacker.test/cb',
-      'HTTP://127.0.0.1:8765/callback',
     ]) {
       expect(isRegisteredRedirectUri(reg, near)).toBe(false);
     }
+  });
+
+  it('treats the scheme as case-insensitive, because it is', () => {
+    // This used to be asserted as a near-miss and rejected, which was an
+    // artifact of comparing strings rather than URLs. RFC 3986 §3.1 makes the
+    // scheme case-insensitive, the destination is byte-identical, and the
+    // platform's matchRedirectUri normalises the same way. Changed deliberately
+    // when loopback matching started parsing instead of comparing text.
+    expect(isRegisteredRedirectUri(reg, 'HTTP://127.0.0.1:8765/callback')).toBe(true);
   });
 
   it('rejects non-strings', () => {
@@ -298,5 +306,79 @@ describe('the id itself is bounded, not just its parts', () => {
     const longId = `mcp_${payload}.${sig}`;
     expect(longId.length).toBeGreaterThan(4096);
     expect(readClientId(longId, SECRET).redirect_uris).toHaveLength(1);
+  });
+});
+
+describe('loopback redirect_uris ignore the port (RFC 8252 §7.3)', () => {
+  // Max found the same bug in the platform's matchRedirectUri, where it had
+  // been flattened to includes() and would have broken `insforge login` — the
+  // CLI binds server.listen(0, '127.0.0.1'), so its port differs every run.
+  // The MCP had it too: a native MCP client registers on an ephemeral port,
+  // and the SDK re-registers only when it holds no client information at all,
+  // never in response to an authorize-time rejection. So an exact match hands
+  // the user the re-add page on every restart with nothing they can do.
+  const reg = (uri: string) => readClientId(mintClientId({ redirect_uris: [uri] }, SECRET), SECRET);
+
+  it('accepts a different port on the same loopback callback', () => {
+    const r = reg('http://127.0.0.1:54321/callback');
+    expect(isRegisteredRedirectUri(r, 'http://127.0.0.1:54321/callback')).toBe(true);
+    expect(isRegisteredRedirectUri(r, 'http://127.0.0.1:61999/callback')).toBe(true);
+    expect(isRegisteredRedirectUri(r, 'http://127.0.0.1/callback')).toBe(true);
+  });
+
+  it('still requires everything except the port to match', () => {
+    const r = reg('http://127.0.0.1:54321/callback');
+    for (const near of [
+      'http://127.0.0.1:61999/evil',            // different path
+      'http://127.0.0.1:61999/callback/../x',   // path traversal
+      'http://127.0.0.1:61999/callback?next=1', // query appears
+      'https://127.0.0.1:61999/callback',       // different scheme
+      'http://[::1]:61999/callback',            // different loopback family
+    ]) {
+      expect(isRegisteredRedirectUri(r, near)).toBe(false);
+    }
+  });
+
+  it('does not extend the relaxation to localhost', () => {
+    // RFC 8252 §8.3: localhost resolves through DNS and the hosts file, so it
+    // can be pointed off the loopback interface. The platform draws the line
+    // in the same place.
+    const named = reg('http://localhost:54321/callback');
+    expect(isRegisteredRedirectUri(named, 'http://localhost:54321/callback')).toBe(true);
+    expect(isRegisteredRedirectUri(named, 'http://localhost:61999/callback')).toBe(false);
+
+    const literal = reg('http://127.0.0.1:54321/callback');
+    expect(isRegisteredRedirectUri(literal, 'http://localhost:54321/callback')).toBe(false);
+  });
+
+  it('does not extend the relaxation to anything routable', () => {
+    const r = reg('https://app.example:8443/cb');
+    expect(isRegisteredRedirectUri(r, 'https://app.example:8443/cb')).toBe(true);
+    // A port-flexible match on a public host would let anyone with a service
+    // on another port of that host collect the code.
+    expect(isRegisteredRedirectUri(r, 'https://app.example:9999/cb')).toBe(false);
+    expect(isRegisteredRedirectUri(r, 'https://app.example/cb')).toBe(false);
+  });
+
+  it('preserves exact match for the custom schemes clients send', () => {
+    const r = reg('cursor://anysphere.cursor-retrieval/oauth/callback');
+    expect(isRegisteredRedirectUri(r, 'cursor://anysphere.cursor-retrieval/oauth/callback')).toBe(true);
+    expect(isRegisteredRedirectUri(r, 'cursor://anysphere.cursor-retrieval/oauth/evil')).toBe(false);
+  });
+
+  it('matches the platform on the same inputs', () => {
+    // Two servers, one dialect. Divergence here is a client that works against
+    // one and not the other, which is the hardest kind of bug to see.
+    const r = reg('http://127.0.0.1:8765/callback');
+    const platformSays: Array<[string, boolean]> = [
+      ['http://127.0.0.1:8765/callback', true],
+      ['http://127.0.0.1:1/callback', true],
+      ['http://127.0.0.1:8765/other', false],
+      ['http://localhost:8765/callback', false],
+      ['https://127.0.0.1:8765/callback', false],
+    ];
+    for (const [uri, expected] of platformSays) {
+      expect(isRegisteredRedirectUri(r, uri), uri).toBe(expected);
+    }
   });
 });
