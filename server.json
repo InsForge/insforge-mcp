@@ -14,7 +14,7 @@
     "url": "https://github.com/InsForge/insforge-mcp",
     "source": "github"
   },
-  "version": "1.2.6",
+  "version": "1.2.12",
   "remotes": [
     {
       "type": "streamable-http",
@@ -25,7 +25,7 @@
     {
       "registryType": "npm",
       "identifier": "@insforge/mcp",
-      "version": "1.2.6",
+      "version": "1.2.12",
       "transport": {
         "type": "stdio"
       },
