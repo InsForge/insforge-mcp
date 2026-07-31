@@ -39,9 +39,9 @@ import {
   type ClientRegistration,
 } from './client-id.js';
 import {
-  AUTH_STATE_COOKIE,
+  authStateCookieName,
   cookieAttributes,
-  readCookie,
+  readCookies,
   isAcceptableClientState,
   MAX_CLIENT_STATE_LENGTH,
 } from './auth-state-cookie.js';
@@ -99,6 +99,28 @@ function isInitializeRequest(body: unknown): boolean {
   }
 
   return false;
+}
+
+/**
+ * The sealed state from the request, or null.
+ *
+ * Every cookie with our name is tried, not just the first. On a shared parent
+ * domain a co-tenant can set a cookie of any name for the parent and the
+ * browser sends it alongside ours; taking the first match let a neighbour
+ * either substitute their value or, with one malformed percent-escape, end
+ * every sign-in. A shadowing value simply fails to open here and the next
+ * candidate is tried.
+ */
+async function openStateFromRequest(
+  req: Request,
+  expectedHandle: string
+): Promise<{ sealed: string; authState: NonNullable<Awaited<ReturnType<ReturnType<typeof getOAuthManager>['getAuthorizationState']>>> } | null> {
+  const oauthManager = getOAuthManager();
+  for (const sealed of readCookies(req.headers.cookie, authStateCookieName(SERVER_CONFIG.publicUrl))) {
+    const authState = await oauthManager.getAuthorizationState(sealed, expectedHandle);
+    if (authState) return { sealed, authState };
+  }
+  return null;
 }
 
 /**
@@ -416,7 +438,7 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
     authUrl.searchParams.set('scope', INSFORGE_CONFIG.oauthScopes);
     // The handle, not the record. The platform stores `state` in a 255-char
     // column; the record itself rides in a cookie on our own origin.
-    res.cookie(AUTH_STATE_COOKIE, sealedState, cookieAttributes(SERVER_CONFIG.publicUrl));
+    res.cookie(authStateCookieName(SERVER_CONFIG.publicUrl), sealedState, cookieAttributes(SERVER_CONFIG.publicUrl));
     authUrl.searchParams.set('state', handle);
     authUrl.searchParams.set('code_challenge', insforgeCodeChallenge);
     authUrl.searchParams.set('code_challenge_method', 'S256');
@@ -452,9 +474,7 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
       errorDescription: (error_description as string) || (error as string) || 'Unknown Insforge error',
       endpoint: '/oauth/callback',
     });
-    const sealed = readCookie(req.headers.cookie, AUTH_STATE_COOKIE);
-    const authState =
-      sealed && state ? await oauthManager.getAuthorizationState(sealed, state as string) : null;
+    const authState = state ? (await openStateFromRequest(req, state as string))?.authState ?? null : null;
 
     if (authState?.redirectUri) {
       const redirectUrl = new URL(authState.redirectUri);
@@ -501,10 +521,7 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
   try {
     // The record is in our cookie; the platform only echoes the handle. Both
     // are required, and they have to name the same authorization.
-    const sealed = readCookie(req.headers.cookie, AUTH_STATE_COOKIE);
-    const authState = sealed
-      ? await oauthManager.getAuthorizationState(sealed, state as string)
-      : null;
+    const authState = (await openStateFromRequest(req, state as string))?.authState ?? null;
     if (!authState) {
       getAnalyticsService().trackOAuthFailure({
         errorType: 'invalid_request',
@@ -583,7 +600,7 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
 
     // Same shape as authorize: the record replaces the cookie, the URL carries
     // only the handle. The handle is unchanged, so the two halves still match.
-    res.cookie(AUTH_STATE_COOKIE, stateWithToken, cookieAttributes(SERVER_CONFIG.publicUrl));
+    res.cookie(authStateCookieName(SERVER_CONFIG.publicUrl), stateWithToken, cookieAttributes(SERVER_CONFIG.publicUrl));
     res.redirect(
       `${SERVER_CONFIG.publicUrl}${OAUTH_ENDPOINTS.selectProject}?state_id=${encodeURIComponent(authState.handle)}`
     );
@@ -619,10 +636,7 @@ app.get(OAUTH_ENDPOINTS.selectProject, async (req: Request, res: Response) => {
   try {
     const oauthManager = getOAuthManager();
 
-    const sealed = readCookie(req.headers.cookie, AUTH_STATE_COOKIE);
-    const authState = sealed
-      ? await oauthManager.getAuthorizationState(sealed, state_id as string)
-      : null;
+    const authState = (await openStateFromRequest(req, state_id as string))?.authState ?? null;
     if (!authState) {
       return res.status(400).send('Session expired. Please start the authorization process again.');
     }
@@ -662,10 +676,9 @@ app.post(OAUTH_ENDPOINTS.selectProject, async (req: Request, res: Response) => {
   try {
     const oauthManager = getOAuthManager();
 
-    const sealed = readCookie(req.headers.cookie, AUTH_STATE_COOKIE);
-    const authState = sealed
-      ? await oauthManager.getAuthorizationState(sealed, state_id as string)
-      : null;
+    const opened = await openStateFromRequest(req, state_id as string);
+    const sealed = opened?.sealed;
+    const authState = opened?.authState ?? null;
     if (!sealed || !authState?.platformAccessToken) {
       return res.status(400).json({
         error: 'invalid_request',
@@ -685,7 +698,7 @@ app.post(OAUTH_ENDPOINTS.selectProject, async (req: Request, res: Response) => {
     // cookie. Clearing it on completion is cheap defence in depth: the sealed
     // state is replayable inside its ten minutes, and there is no reason to
     // leave a usable copy in the browser once the flow has finished.
-    res.clearCookie(AUTH_STATE_COOKIE, { path: '/oauth' });
+    res.clearCookie(authStateCookieName(SERVER_CONFIG.publicUrl), { path: '/' });
 
     const redirectUrl = new URL(authState.redirectUri);
     redirectUrl.searchParams.set('code', code);

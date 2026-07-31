@@ -31,7 +31,33 @@ import { randomBytes } from 'crypto';
  * prevent.
  */
 
-/** The cookie carrying the sealed state. Scoped to the OAuth routes only. */
+/**
+ * The cookie carrying the sealed state.
+ *
+ * `__Host-` is not decoration. On a shared parent domain — which
+ * `*.run.mcp-use.com` is, with our own insta-mcp servers as neighbours — any
+ * co-tenant can set a Domain cookie of ANY name for the parent, and the browser
+ * sends it to us alongside our own. The prefix is the only mechanism that stops
+ * that: a browser refuses to store a `__Host-` cookie unless it has Secure, has
+ * Path=/, and has NO Domain attribute, which together mean only the exact host
+ * can set it.
+ *
+ * Path=/ rather than /oauth is the cost, and it is not a real one — cookie paths
+ * were never a security boundary; any path on a host can read or set the host's
+ * cookies. The prefix buys a guarantee, the path never did.
+ *
+ * The name falls back only when there is no TLS at all, because `__Host-`
+ * requires Secure and a Secure cookie is dropped on plaintext http. That is
+ * local development and nothing else — no deployment of this server runs
+ * without https — but it is a fallback, and fallbacks are how protections get
+ * lost, so it is keyed on the scheme rather than on an environment flag someone
+ * could set.
+ */
+export function authStateCookieName(publicUrl: string): string {
+  return publicUrl.startsWith('https://') ? '__Host-mcp_oauth_state' : 'mcp_oauth_state';
+}
+
+/** @deprecated Prefer authStateCookieName(publicUrl); kept for the http case. */
 export const AUTH_STATE_COOKIE = 'mcp_oauth_state';
 
 /**
@@ -73,40 +99,57 @@ export interface CookieAttributes {
  * runs on http://127.0.0.1. Hardcoding true makes every local run fail in a way
  * that looks like a code bug.
  */
-export function cookieAttributes(publicUrl: string, oauthPathPrefix = '/oauth'): CookieAttributes {
+export function cookieAttributes(publicUrl: string): CookieAttributes {
   return {
     httpOnly: true,
     secure: publicUrl.startsWith('https://'),
     sameSite: 'lax',
-    path: oauthPathPrefix,
+    // Path=/ is required by __Host-, and costs nothing: a cookie path has never
+    // been a security boundary. Any path on the host can read or set it.
+    path: '/',
     maxAge: AUTH_STATE_COOKIE_MAX_AGE_SECONDS * 1000,
   };
 }
 
 /**
- * Read one cookie out of a raw Cookie header.
+ * Read EVERY cookie with this name, not the first.
  *
- * Hand-rolled rather than adding cookie-parser: this reads exactly one name,
- * and a dependency whose whole job is `split('; ')` is a dependency to keep
- * patched forever. Values are percent-encoded on the way out, so decode here.
+ * The first version returned the first match and gave up on a decode error, and
+ * both of those were exploitable by a co-tenant on a shared parent domain.
+ * Measured on the shipped code rather than argued:
+ *
+ *   Cookie: NAME=v1.ATTACKER; NAME=<ours>   -> we read the attacker's
+ *   Cookie: NAME=%E0%A4%A;    NAME=<ours>   -> we read undefined, forever
+ *
+ * The second is the worse one: a single malformed percent-escape from a
+ * neighbour is a permanent sign-in outage needing no crypto, no timing and no
+ * knowledge of our internals. "Fails closed" was the wrong frame — the question
+ * is closed for WHOM, and it was closed for us and open for them.
+ *
+ * So: collect every candidate, skip the ones that will not decode, and let the
+ * caller try each. Shadowing becomes inert because a shadowing value simply
+ * fails to open and the next one is tried. This matters more than the
+ * `__Host-` prefix, because it survives someone dropping the prefix later —
+ * which is exactly how this class of bug comes back.
  */
-export function readCookie(header: string | undefined, name: string): string | undefined {
-  if (typeof header !== 'string' || header.length === 0) return undefined;
+export function readCookies(header: string | undefined, name: string): string[] {
+  if (typeof header !== 'string' || header.length === 0) return [];
 
+  const found: string[] = [];
   for (const part of header.split(';')) {
     const eq = part.indexOf('=');
     if (eq === -1) continue;
     if (part.slice(0, eq).trim() !== name) continue;
     const raw = part.slice(eq + 1).trim();
     try {
-      return decodeURIComponent(raw);
+      found.push(decodeURIComponent(raw));
     } catch {
-      // A malformed value is not ours; treat it as absent rather than throwing
-      // a decode error out of the middle of a sign-in.
-      return undefined;
+      // Not ours — ours is base64url and always decodes. CONTINUE rather than
+      // return: one bad neighbour must not end the search.
+      continue;
     }
   }
-  return undefined;
+  return found;
 }
 
 /**
