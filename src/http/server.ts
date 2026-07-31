@@ -8,8 +8,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 
 // Local imports
-import { getSessionManager } from './session-manager.js';
-import { getRedisClient, closeRedisClient, getRedisConfig, isRedisConfigured } from './redis.js';
+import { getSessionManager, routeForSessionRequest } from './session-manager.js';
+
 import { getOAuthManager } from './oauth-manager.js';
 import {
   SERVER_CONFIG,
@@ -219,9 +219,9 @@ function heapStats() {
 // Health & Discovery Endpoints
 // ============================================================================
 
-app.get(API_ENDPOINTS.health, async (_req: Request, res: Response) => {
+app.get(API_ENDPOINTS.health, (_req: Request, res: Response) => {
   const sessionManager = getSessionManager();
-  const stats = await sessionManager.getStats();
+  const stats = sessionManager.getStats();
 
   res.json({
     status: 'ok',
@@ -989,27 +989,46 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
   // Check if we have an existing session in memory (must be Streamable HTTP transport)
   const existingRuntime = sessionId ? sessionManager.getStreamableSession(sessionId) : null;
 
-  if (existingRuntime) {
-    transport = existingRuntime.transport;
+  const route = routeForSessionRequest({
+    hasRuntime: existingRuntime !== null,
+    sessionId,
+    isInitialize: isInitializeRequest(req.body),
+  });
+
+  if (route === 'use-existing') {
+    transport = existingRuntime!.transport;
     console.log('[Streamable HTTP] Using existing transport for session:', sessionId);
-    await sessionManager.touchSession(sessionId);
-  } else if (sessionId && await sessionManager.hasSession(sessionId)) {
-    console.log('[Streamable HTTP] Session found in Redis, restoring:', sessionId);
-
-    transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => sessionId,
-      onsessioninitialized: () => {
-        console.log(`[Streamable HTTP] Session restored: ${sessionId}`);
-      },
+    sessionManager.touchSession(sessionId);
+  } else if (route === 'not-found') {
+    // A session id we do not hold. 404 IS THE ANSWER, and it is the one part of
+    // this change a client actually depends on.
+    //
+    // The restore branch that used to be here rebuilt a server and transport
+    // from a Redis record around the same session id. With no record there is
+    // nothing to rebuild, so the question is only which status says so, and the
+    // protocol answers it: a client that receives 404 for a request carrying an
+    // Mcp-Session-Id MUST start a new session with an InitializeRequest
+    // (Streamable HTTP, 2025-03-26). The SDK's own server does the same —
+    // "Requests with invalid session IDs are rejected with 404 Not Found".
+    //
+    // The 400 this used to fall through to is the wrong shape for the same
+    // reason a 500 was wrong for a stale token (#95): it is not the code the
+    // client's recovery is keyed on, so it reads as "your request was
+    // malformed" and the client stops instead of signing back in. Answering 400
+    // here would turn every restart into a stuck client.
+    //
+    // NOT verified end to end: nobody has watched a real editor take this 404
+    // and re-initialize. The status is what the spec and the SDK server agree
+    // on; the client's behaviour is Quinn's test, and it is the acceptance for
+    // this change rather than a detail after it.
+    console.log('[Streamable HTTP] Unknown session, asking the client to start a new one:', sessionId);
+    return res.status(404).json({
+      error: 'Session not found',
+      error_description:
+        'This session is not held by the server — it expired, or the server restarted. ' +
+        'Send an initialize request to start a new one.',
     });
-
-    const server = await sessionManager.restoreSession(sessionId, transport);
-    if (!server) {
-      return res.status(500).json({
-        error: 'Failed to restore session from Redis',
-      });
-    }
-  } else if (isInitializeRequest(req.body)) {
+  } else if (route === 'create') {
     // New session - validate and create
     let projectInfo = oauthToken ? await resolveProjectFromToken(oauthToken) : null;
 
@@ -1122,22 +1141,19 @@ app.get(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
 
   const runtime = sessionManager.getStreamableSession(sessionId);
   if (!runtime) {
-    if (await sessionManager.hasSession(sessionId)) {
-      return res.status(400).json({
-        error: 'Session exists but not active. Send a POST request to restore the session first.',
-      });
-    }
+    // The "exists but not active" branch is gone with the store that made it
+    // possible: a session this process does not hold does not exist anywhere.
     return res.status(404).json({
       error: 'Session not found. Initialize first with POST request.',
     });
   }
 
   // This stream is the only sign of life for a client that opens it and then
-  // sends nothing. Hold the session for as long as it is open, and restart the
-  // Redis record's clock now so a restart can still restore the session.
+  // sends nothing. Hold the session for as long as it is open, and start the
+  // idle clock now rather than from whenever the last POST arrived.
   sessionManager.openStream(sessionId);
   res.on('close', () => sessionManager.closeStream(sessionId));
-  await sessionManager.touchSession(sessionId);
+  sessionManager.touchSession(sessionId);
 
   await runtime.transport.handleRequest(req, res, req.body);
 });
@@ -1159,12 +1175,7 @@ app.delete(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) =>
 
   const runtime = sessionManager.getStreamableSession(sessionId);
   if (!runtime) {
-    if (await sessionManager.hasSession(sessionId)) {
-      await sessionManager.deleteSession(sessionId);
-      return res.status(200).json({
-        message: 'Session deleted from storage.',
-      });
-    }
+    // Likewise: there is no record to delete separately from the session.
     return res.status(404).json({
       error: 'Session not found.',
     });
@@ -1344,15 +1355,11 @@ app.post(SSE_ENDPOINTS.messages, async (req: Request, res: Response) => {
     });
   }
 
-  // Streamable HTTP refreshes the Redis record on every request; the SSE path
-  // did not, so an SSE record lapsed 24h after creation however active the
-  // client was, and /health under-reported live SSE sessions. Fire-and-forget:
-  // a failed refresh must not fail the message.
-  getSessionManager()
-    .touchSession(sessionId)
-    .catch((error) => {
-      console.error(`[SSE] Failed to refresh session ${tokenFingerprint(sessionId)}`, error);
-    });
+  // The streamable path stamps a session on every request; the SSE path did
+  // not, so an SSE session read as idle from creation however active the client
+  // was. Kept — it is still the only thing that marks an SSE session alive.
+  // It can no longer fail, so it no longer needs a catch.
+  getSessionManager().touchSession(sessionId);
 
   await transport.handlePostMessage(req, res, req.body);
 });
@@ -1366,43 +1373,17 @@ async function startServer() {
     // Validate configuration
     validateConfig();
 
-    // Redis is on its way out of this server, and until the last use is gone a
-    // deploy without it should still boot. It used to exit 1 here, before
-    // app.listen, so nothing was reachable — not /health, not discovery, not
-    // even a log line naming the cause once the container had looped a few
-    // times. A server that answers and refuses to sign anyone in is far more
-    // diagnosable than one that is not there.
-    if (isRedisConfigured()) {
-      const redis = getRedisClient();
-      await redis.ping();
-      console.log('[Redis] Connection verified');
-
-      // Runtime sessions are only dropped on an explicit DELETE, which
-      // Streamable HTTP clients rarely send. Reap the ones Redis has already
-      // expired. Nothing to sweep when there is no Redis to expire them.
-      getSessionManager().startIdleSweep(SESSION_SWEEP_MS);
-    } else {
-      // Measured rather than assumed: with no Redis, /health and all four
-      // discovery documents answer 200 and POST /mcp gives its 401 challenge,
-      // which is everything needed to prove the edge routes us. /oauth/* still
-      // 500s — registration and auth state are the next slices — so the list
-      // below says so instead of promising a login that will not complete.
-      console.warn(
-        '[Redis] Not configured (no REDIS_URL or REDIS_HOST). ' +
-          'The whole OAuth path now runs without it — registration, sign-in, ' +
-          'tokens. Only MCP SESSIONS still need Redis; /mcp and /sse will fail ' +
-          'until those move in-process.'
-      );
-    }
+    // Unconditional, where it used to be gated on Redis being configured.
+    //
+    // That gate was right when Redis owned session lifetime and this timer only
+    // reclaimed the instances left behind. Now this IS session expiry: nothing
+    // else drops a session that a client walked away from, so a server that
+    // does not start the sweep leaks every session it ever creates until the
+    // heap runs out. Roughly 252 kB per session against this machine's ~493 MB
+    // heap limit — about 2,000 — so "leaks" means hours, not months.
+    getSessionManager().startIdleSweep(SESSION_SWEEP_MS);
 
     const server = app.listen(SERVER_CONFIG.port, SERVER_CONFIG.host, () => {
-      const redisConfig = getRedisConfig();
-      // The banner used to print "localhost:6379" whether or not anything was
-      // there, which is the same shape of lie as the REDIS_PASSWORD that looked
-      // configured and never reached ioredis. Print what is true.
-      const redisLine = isRedisConfigured()
-        ? `${redisConfig.host}:${redisConfig.port} (TLS: ${redisConfig.tls}, Cluster: ${redisConfig.cluster})`
-        : 'not configured — OAuth works; MCP sessions unavailable';
       console.log(`
 ╔═══════════════════════════════════════════════════════════════════════╗
 ║              Insforge MCP Remote Server (OAuth)                       ║
@@ -1453,7 +1434,7 @@ async function startServer() {
    • Bind:       POST ${SERVER_CONFIG.publicUrl}${API_ENDPOINTS.bindProject}
 
 💾 Configuration:
-   • Redis:      ${redisLine}
+   • Sessions:   in this process only — a restart ends them
    • Insforge:   ${INSFORGE_CONFIG.apiBase}
    • Frontend:   ${INSFORGE_CONFIG.frontendUrl}
    • Analytics:  ${isAnalyticsConfigured() ? 'Mixpanel enabled' : 'Disabled (set MIXPANEL_TOKEN)'}
@@ -1490,12 +1471,6 @@ async function startServer() {
           console.error('[Shutdown] Error closing sessions:', error);
         }
 
-        // Close Redis connection
-        try {
-          await closeRedisClient();
-        } catch (error) {
-          console.error('[Shutdown] Error closing Redis client:', error);
-        }
       } finally {
         // Always close the HTTP server, even if cleanup fails
         server.close(() => {

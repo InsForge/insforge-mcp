@@ -225,10 +225,11 @@ export function accessTokenKey(): Buffer {
 // Redis Configuration
 // ============================================================================
 //
-// Deliberately not here. Redis config is read in redis.ts, next to the client
-// it configures. A second copy lived here, unimported, and it advertised a
-// REDIS_PASSWORD that the real client never sent — so a password-protected
-// Redis failed to connect with the variable sitting there looking correct.
+// Gone, along with redis.ts and the ioredis dependency. This note stays for one
+// release because REDIS_URL / REDIS_HOST are still set on deployed
+// environments: they are now READ BY NOTHING. Removing them is safe and does
+// nothing; leaving them set is also safe and also does nothing. What is not
+// safe is assuming a Redis is still there because the variable is.
 
 // ============================================================================
 // Session Configuration
@@ -252,18 +253,17 @@ export function positiveIntEnv(value: string | undefined, fallback: number): num
 export const SSE_KEEPALIVE_MS = positiveIntEnv(process.env.MCP_SSE_KEEPALIVE_MS, 25 * 1000);
 
 /**
- * How often to reap runtime sessions whose Redis record has expired.
- * Overridable so the reaper can be exercised without waiting minutes.
+ * How often to look for sessions to reap.
+ *
+ * This is no longer housekeeping behind a Redis TTL — it IS session expiry, and
+ * nothing else releases a session's memory. Overridable so the sweep can be
+ * exercised without waiting minutes.
  */
 export const SESSION_SWEEP_MS = positiveIntEnv(process.env.MCP_SESSION_SWEEP_MS, 5 * 60 * 1000);
 
-export const SESSION_CONFIG = {
-  /** Session TTL in seconds (24 hours) */
-  ttl: 24 * 60 * 60,
-
-  /** Redis key prefix for sessions */
-  keyPrefix: 'mcp:session:',
-} as const;
+// SESSION_CONFIG is gone with the store it described: its `ttl` was a duplicate
+// of the one in session-manager.ts and its `keyPrefix` named Redis keys that no
+// longer exist. Two constants for one timeout is how they drift apart.
 
 // ============================================================================
 // Analytics Configuration
