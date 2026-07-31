@@ -39,6 +39,29 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
  * out to bound this hop too, with room. That is luck rather than design:
  * anyone raising that constant has to re-measure THIS number, not only the one
  * it was chosen for.
+ *
+ * AND THE LIMIT THAT ACTUALLY BIT, which none of the above caught: the platform
+ * stores `state` in a 255-character column. Every request-line limit is
+ * satisfied and the platform still returns 500, because the constraint was a
+ * database column and not a byte budget. Our 302 is real; the hop after it is
+ * not, and measuring only our own response is what hid that.
+ *
+ * Shrinking this envelope does not fix it. Measured across every variant the
+ * flow permits:
+ *
+ *   as built (realistic client_id)     709   over
+ *   drop client_id entirely            467   over
+ *   drop client_id AND client state    410   over   <- the floor for a state
+ *                                                      that can still complete
+ *                                                      a callback
+ *   only the PKCE verifier             153   fits, but loses redirectUri, the
+ *                                                   client's state and the
+ *                                                   code challenge
+ *
+ * So `state` has to go back to being a short handle with the payload carried
+ * somewhere else — a cookie on our own origin is the option that keeps this
+ * module and drops nothing. Do not spend an afternoon trimming fields; 410 is
+ * the floor and the column is 255.
  */
 
 export class InvalidAuthStateError extends Error {}
