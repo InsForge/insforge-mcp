@@ -124,6 +124,45 @@ export const ACCESS_TOKEN_TTL_SECONDS = 24 * 60 * 60;
  */
 export const MAX_ACCESS_TOKEN_LENGTH = 4096;
 
+/**
+ * How long this token is ACTUALLY good for, in seconds.
+ *
+ * The PR said "24h or the platform token's expiry, whichever is sooner" and the
+ * code returned a flat 24h to the client. Those disagree in the direction that
+ * matters: when the platform token dies first, our token stops working while
+ * the client still believes it has hours left — so it keeps retrying a
+ * credential we already know is dead instead of signing in again.
+ *
+ * The platform token is a JWT, so its `exp` is readable. We do NOT verify it —
+ * it is not ours to verify, and a forged one would only ever SHORTEN what we
+ * advertise, which is the harmless direction. Anything unreadable falls back to
+ * our own TTL, because a token we cannot parse is not evidence of anything.
+ */
+export function accessTokenLifetimeSeconds(
+  payload: AccessTokenPayload,
+  nowMs: number = Date.now()
+): number {
+  const platformExp = jwtExpirySeconds(payload.platformAccessToken);
+  if (platformExp === null) return ACCESS_TOKEN_TTL_SECONDS;
+
+  const platformRemaining = Math.floor(platformExp - nowMs / 1000);
+  // Never negative: an already-expired platform token means zero life left, and
+  // `expires_in: -400` is not something any client is prepared to read.
+  return Math.max(0, Math.min(ACCESS_TOKEN_TTL_SECONDS, platformRemaining));
+}
+
+/** The `exp` claim, or null for anything that is not a readable JWT. */
+function jwtExpirySeconds(token: string): number | null {
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    return typeof claims?.exp === 'number' && Number.isFinite(claims.exp) ? claims.exp : null;
+  } catch {
+    return null;
+  }
+}
+
 export function issueAccessToken(
   payload: AccessTokenPayload,
   key: Buffer,

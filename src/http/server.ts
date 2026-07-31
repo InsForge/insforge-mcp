@@ -8,8 +8,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 
 // Local imports
-import { getSessionManager } from './session-manager.js';
-import { getRedisClient, closeRedisClient, getRedisConfig, isRedisConfigured } from './redis.js';
+import { getSessionManager, routeForSessionRequest } from './session-manager.js';
+
 import { getOAuthManager } from './oauth-manager.js';
 import {
   SERVER_CONFIG,
@@ -45,10 +45,11 @@ import {
   isAcceptableClientState,
   MAX_CLIENT_STATE_LENGTH,
 } from './auth-state-cookie.js';
-import { ACCESS_TOKEN_TTL_SECONDS, readAccessToken } from './access-token.js';
+import { ACCESS_TOKEN_TTL_SECONDS, accessTokenLifetimeSeconds, readAccessToken } from './access-token.js';
 import { getProjectKeyCache } from './project-key-cache.js';
 import { accessTokenKey } from './config.js';
-import { statusForHttpError } from './error-status.js';
+import { statusForHttpError, isAuthorizationRefusal } from './error-status.js';
+import { revokePlatformToken, exchangePlatformCode, type PlatformTokens } from './insforge-api.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
 
 // ============================================================================
@@ -137,7 +138,7 @@ function tokenFingerprint(token: string): string {
 /**
  * Resolve project information from OAuth token
  */
-async function resolveProjectFromToken(token: string): Promise<{
+interface ResolvedProject {
   apiKey: string;
   apiBaseUrl: string;
   projectId: string;
@@ -145,33 +146,76 @@ async function resolveProjectFromToken(token: string): Promise<{
   userId: string;
   organizationId: string;
   oauthTokenHash: string;
-} | null> {
+}
+
+/**
+ * Three outcomes, not two.
+ *
+ * `unavailable` is the one that had to be added back. #95 collapsed every
+ * failure into "no project" so that a stale token could not produce a 500 with
+ * no challenge, and the justification I wrote was that the client's available
+ * action is identical either way. **It stops being identical the moment a retry
+ * would have worked** — which is exactly a platform blip. Iris named that, and
+ * she is right: the rule is 401 when the credential is the problem, 5xx when we
+ * could not tell.
+ *
+ * Both halves still matter. Reporting a fault as 401 drags a user through a
+ * browser login to fix something that would have cleared on its own; reporting
+ * a dead credential as 500 tells the client to give up when signing in again is
+ * exactly what it should do.
+ */
+type ProjectResolution =
+  | { outcome: 'resolved'; project: ResolvedProject }
+  | { outcome: 'unauthorized' }
+  | { outcome: 'unavailable' };
+
+/**
+ * We could not find out whether this credential is good.
+ *
+ * 503 rather than 500 because it is specifically temporary, and with
+ * `Retry-After` because that is the difference between a client that backs off
+ * and one that hammers a platform already in trouble. Deliberately carries NO
+ * `WWW-Authenticate`: the header is an instruction to re-run OAuth, and sending
+ * it here would produce exactly the pointless browser login this distinction
+ * exists to prevent.
+ */
+function sendUnavailable(res: Response): Response {
+  return res
+    .status(503)
+    .set('Retry-After', '5')
+    .json({
+      error: 'temporarily_unavailable',
+      error_description:
+        'Could not reach the InsForge platform to check this session. Your sign-in has not been ' +
+        'invalidated — retry shortly.',
+    });
+}
+
+async function resolveProject(token: string): Promise<ProjectResolution> {
   const oauthManager = getOAuthManager();
   try {
-    return await oauthManager.resolveProjectFromToken(token);
+    const project = await oauthManager.resolveProjectFromToken(token);
+    return project ? { outcome: 'resolved', project } : { outcome: 'unauthorized' };
   } catch (error) {
-    // NOTHING here may escape, and that is the whole point of this wrapper.
+    // NOTHING here may escape as an unhandled throw — that is still the point
+    // of this wrapper, and it is why a stale bearer no longer produces a 500
+    // with a raw Express stack and no WWW-Authenticate (#95, measured on the
+    // live slug).
     //
-    // Measured on the live slug: a stale bearer — one issued before today's
-    // token format changed — reached Redis, threw MaxRetriesPerRequestError,
-    // and Express answered with a 500 and a raw stack. No WWW-Authenticate.
+    // What has changed is WHICH answer it turns into. #95 made every failure a
+    // challenge, on the argument that the client's available action is
+    // identical either way. That argument is sound for a dead credential and
+    // wrong for a platform blip: re-authorizing does not fix a platform that is
+    // down, and telling a client its sign-in is invalid throws away a working
+    // session and sends a person to a browser for nothing.
     //
-    // "Not a 500" is not the same as "a 401". The challenge header is the ONLY
-    // thing that tells an MCP client to re-run OAuth; a 500 reads as "the
-    // server is broken, give up", so a client holding an old token never
-    // recovers on its own. Iris found this, and it is not hypothetical: the
-    // token format changed three times today and every client holding an
-    // earlier one lands here, as will every existing user at the cutover.
-    //
-    // The honest cost, stated rather than hidden: a genuine infrastructure
-    // fault is now also reported as an authorization failure, which
-    // mislabels it. That is the right trade only because the client's
-    // available action is identical either way — re-authorize — and because a
-    // silent 500 gives it no action at all. The fault is logged at error level
-    // so it stays visible to us even though the client is told something
-    // softer.
-    console.error('[OAuth] Could not resolve a token; answering with a challenge:', error);
-    return null;
+    // A token that does not open never reaches here — resolveProjectFromToken
+    // returns null for that, which is 'unauthorized'. Anything that throws is
+    // by definition something we could not determine, so it is 'unavailable'
+    // and the caller answers 503 with Retry-After. The challenge stays for the
+    // case the challenge is actually the remedy.
+    console.error('[OAuth] Could not determine whether this token is valid:', error);
+    return { outcome: 'unavailable' };
   }
 }
 
@@ -219,9 +263,9 @@ function heapStats() {
 // Health & Discovery Endpoints
 // ============================================================================
 
-app.get(API_ENDPOINTS.health, async (_req: Request, res: Response) => {
+app.get(API_ENDPOINTS.health, (_req: Request, res: Response) => {
   const sessionManager = getSessionManager();
-  const stats = await sessionManager.getStats();
+  const stats = sessionManager.getStats();
 
   res.json({
     status: 'ok',
@@ -595,27 +639,63 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
     }
 
     console.log('[OAuth] Exchanging code for tokens...');
-    const tokenResponse = await fetch(`${INSFORGE_CONFIG.apiBase}/api/oauth/v1/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        grant_type: 'authorization_code',
-        code: code,
-        redirect_uri: OAUTH_CONFIG.callbackUrl,
-        client_id: INSFORGE_CONFIG.clientId,
-        client_secret: INSFORGE_CONFIG.clientSecret,
-        code_verifier: authState.insforgeCodeVerifier,
-      }),
-    });
 
-    const tokens = await tokenResponse.json() as {
-      access_token?: string;
-      refresh_token?: string;
-      token_type?: string;
-      expires_in?: number;
-      error?: string;
-      error_description?: string;
-    };
+    // THE THIRD UPSTREAM CALL, and the one that renders in a person's browser.
+    //
+    // Iris forced the platform unroutable on a branch env and drove this path
+    // without a login — /oauth/authorize is unauthenticated, so a stranger can
+    // reach the exchange:
+    //
+    //   platform reachable    400 invalid_grant     (the platform's own answer)
+    //   platform unroutable   500 "fetch failed"    Node's raw message, no Retry-After
+    //
+    // My own rule — 401 when the credential is the problem, 5xx when we could
+    // not tell — held on revoke and resolve and not here, which is exactly the
+    // shape that reads as done and is not. A mid-sign-in platform blip showed a
+    // human `server_error: fetch failed` on the callback page.
+    //
+    // The two cases are now separated by WHERE they are handled: a thrown error
+    // means we could not reach the platform and falls to the catch below, which
+    // answers 503; a parsed body with an `error` field means the platform
+    // answered and declined, which stays a 400.
+    let tokens: PlatformTokens;
+    try {
+      tokens = await exchangePlatformCode({
+        code: code as string,
+        redirectUri: OAUTH_CONFIG.callbackUrl,
+        clientId: INSFORGE_CONFIG.clientId,
+        clientSecret: INSFORGE_CONFIG.clientSecret,
+        codeVerifier: authState.insforgeCodeVerifier,
+      });
+    } catch (error) {
+      console.error('[OAuth] Could not reach the platform to exchange the code:', error);
+      getAnalyticsService().trackOAuthFailure({
+        errorType: 'temporarily_unavailable',
+        errorDescription: 'Token exchange could not reach the platform',
+        endpoint: '/oauth/callback',
+      });
+      res.set('Retry-After', '5');
+      return sendOAuthError(
+        req,
+        res,
+        503,
+        {
+          error: 'temporarily_unavailable',
+          // Deliberately not the raw error. "fetch failed" is Node talking to
+          // itself; it tells the person nothing and is what was reaching the
+          // browser before.
+          error_description:
+            'The InsForge platform could not be reached to complete this sign-in.',
+        },
+        {
+          heading: 'InsForge could not be reached',
+          message:
+            'This is temporary and nothing is wrong with your account or your editor. ' +
+            'Wait a moment and start the sign-in again.',
+          action: undefined,
+        }
+      );
+    }
 
     if (tokens.error || !tokens.access_token) {
       console.error('[OAuth] Token exchange error:', tokens);
@@ -800,14 +880,23 @@ app.post(OAUTH_ENDPOINTS.token, async (req: Request, res: Response) => {
         scope: 'mcp:read mcp:write',
       });
 
+      // 24 hours, not the binding's 30 days: a value that cannot be revoked
+      // directly should not live for a month. But the platform token sealed
+      // inside has its own expiry, and whichever runs out first ends the
+      // session — so advertise the real minimum rather than our ceiling.
+      //
+      // Saying a flat 24h was the "safe direction" only for us. For a client
+      // whose platform token dies in two hours it means four more of retrying a
+      // credential we already know is dead, instead of signing in again.
+      const payload = readAccessToken(accessToken, accessTokenKey());
+      const expiresIn = payload
+        ? accessTokenLifetimeSeconds(payload)
+        : ACCESS_TOKEN_TTL_SECONDS;
+
       res.json({
         access_token: accessToken,
         token_type: 'Bearer',
-        // 24 hours, not the binding's 30 days. A value that cannot be revoked
-        // directly should not live for a month, and the platform token sealed
-        // inside has its own expiry — whichever runs out first ends the
-        // session, which is the safe direction.
-        expires_in: ACCESS_TOKEN_TTL_SECONDS,
+        expires_in: expiresIn,
         scope: 'mcp:read mcp:write',
       });
     } catch (error) {
@@ -858,25 +947,77 @@ app.post(OAUTH_ENDPOINTS.revoke, async (req: Request, res: Response) => {
     });
   }
 
-  // There is no row to delete any more: the token carries its own record. What
-  // we CAN do is drop the cached project key, so the very next call re-asks the
-  // platform instead of using a key we already fetched — and the platform is
-  // where revocation is actually enforced (validateAccessToken checks
-  // `revoked` on every call).
+  // THIS ENDPOINT USED TO DO NOTHING, and returned 200 while doing it.
   //
-  // RFC 7009 §2.2 wants 200 whatever happens, including for a token we do not
-  // recognise, so that this endpoint cannot be used to probe which tokens are
-  // real. That was already the behaviour and it stays.
-  try {
-    const payload = readAccessToken(token as string, accessTokenKey());
-    if (payload) {
-      getProjectKeyCache().forgetUser(payload.userId);
-      console.log(`[OAuth] Cached project keys dropped for ${payload.userId} on revoke`);
-    }
-  } catch {
-    // Deliberately swallowed: see above.
+  // With the binding row gone, all it did was drop the cached project key. The
+  // sealed bearer still carried a live platform token, so the very next request
+  // re-fetched the key and succeeded: revoking a leaked credential forced one
+  // extra round trip and left it working for its full 24 hours. A revoke that
+  // reports success and changes nothing is worse than no revoke at all, because
+  // the person who called it stops looking for the leak.
+  //
+  // So revoke the thing that actually grants access — the platform token sealed
+  // inside. Iris confirmed the upstream endpoint is deployed and needs only our
+  // client id. The alternative considered and rejected was a local revocation
+  // marker: that is a durable per-token record consulted on every request, which
+  // is `mcp:auth:binding:` again under another name and would put back the store
+  // this whole effort removed.
+  const payload = readAccessToken(token as string, accessTokenKey());
+
+  if (!payload) {
+    // Not a token we issued, or already expired. RFC 7009 §2.2: answer 200
+    // anyway, so this endpoint cannot be used to probe which tokens are real.
+    // Nothing to revoke and nothing went wrong.
+    return res.status(200).send();
   }
-  res.status(200).send();
+
+  // Drop the cached keys first, and unconditionally. It is local, it cannot
+  // fail, and it must happen even if the upstream call below does not — a
+  // revocation that half-worked should still stop us serving a key we already
+  // hold.
+  getProjectKeyCache().forgetUser(payload.userId);
+
+  try {
+    await revokePlatformToken(payload.platformAccessToken, INSFORGE_CONFIG.clientId);
+    console.log(`[OAuth] Platform token revoked for ${payload.userId}`);
+    return res.status(200).send();
+  } catch (error) {
+    // NOT a 200. RFC 7009's blanket success is about not leaking which tokens
+    // exist; it is not licence to report a revocation that failed as one that
+    // worked. The caller is trying to shut off a credential — telling them it
+    // is off when it is still live is the same false assurance this endpoint
+    // just stopped giving, one layer down.
+    //
+    // This does mean a failure here distinguishes "was ours" from "was not",
+    // which the blanket 200 exists to hide. It only happens when the platform
+    // is already failing, it is not attacker-triggerable, and the alternative
+    // is lying about a security operation. Stated so the trade is visible
+    // rather than discovered.
+    console.error(`[OAuth] FAILED to revoke the platform token for ${payload.userId}:`, error);
+
+    // The same classification as everywhere else, because the caller's next
+    // move differs the same way: a platform that could not be reached is worth
+    // retrying, and a platform that refused our client credentials is our
+    // misconfiguration and retrying will not help.
+    if (isAuthorizationRefusal(error)) {
+      return res.status(500).json({
+        error: 'server_error',
+        error_description:
+          'This server could not authenticate itself to the platform to revoke the token. ' +
+          'The token may still be usable. This is a server misconfiguration, not something ' +
+          'retrying will fix.',
+      });
+    }
+
+    return res
+      .status(503)
+      .set('Retry-After', '5')
+      .json({
+        error: 'temporarily_unavailable',
+        error_description:
+          'The platform could not be reached to revoke this token. It may still be usable — retry.',
+      });
+  }
 });
 
 // ============================================================================
@@ -1004,29 +1145,70 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
   // Check if we have an existing session in memory (must be Streamable HTTP transport)
   const existingRuntime = sessionId ? sessionManager.getStreamableSession(sessionId) : null;
 
-  if (existingRuntime) {
-    transport = existingRuntime.transport;
+  // ROUTING HAPPENS BEFORE AUTHENTICATION, and that is deliberate — do not
+  // "harden" it by moving the token check above this.
+  //
+  // A client whose session died needs the 404 whether or not its token is also
+  // stale. Authenticate first and that client gets a 401 instead, sending it
+  // through an OAuth round trip to fix a problem it does not have; if its token
+  // is in fact fine, it re-authorizes, retries with the same dead session id
+  // and lands right back here. The 404 is the answer to "your session is gone",
+  // and it has to be reachable by a client that has nothing else wrong with it.
+  //
+  // Note for anyone auditing what is reachable unauthenticated: an existing
+  // session is served without a token check too, so the Mcp-Session-Id is a
+  // bearer credential in its own right. That is unchanged by this file's
+  // history — master does the same — and it is why the id is randomUUID() and
+  // never derived from anything guessable.
+  const route = routeForSessionRequest({
+    hasRuntime: existingRuntime !== null,
+    sessionId,
+    isInitialize: isInitializeRequest(req.body),
+  });
+
+  if (route === 'use-existing') {
+    transport = existingRuntime!.transport;
     console.log('[Streamable HTTP] Using existing transport for session:', sessionId);
-    await sessionManager.touchSession(sessionId);
-  } else if (sessionId && await sessionManager.hasSession(sessionId)) {
-    console.log('[Streamable HTTP] Session found in Redis, restoring:', sessionId);
-
-    transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => sessionId,
-      onsessioninitialized: () => {
-        console.log(`[Streamable HTTP] Session restored: ${sessionId}`);
-      },
+    sessionManager.touchSession(sessionId);
+  } else if (route === 'not-found') {
+    // A session id we do not hold. 404 IS THE ANSWER, and it is the one part of
+    // this change a client actually depends on.
+    //
+    // The restore branch that used to be here rebuilt a server and transport
+    // from a Redis record around the same session id. With no record there is
+    // nothing to rebuild, so the question is only which status says so, and the
+    // protocol answers it: a client that receives 404 for a request carrying an
+    // Mcp-Session-Id MUST start a new session with an InitializeRequest
+    // (Streamable HTTP, 2025-03-26). The SDK's own server does the same —
+    // "Requests with invalid session IDs are rejected with 404 Not Found".
+    //
+    // The 400 this used to fall through to is the wrong shape for the same
+    // reason a 500 was wrong for a stale token (#95): it is not the code the
+    // client's recovery is keyed on, so it reads as "your request was
+    // malformed" and the client stops instead of signing back in. Answering 400
+    // here would turn every restart into a stuck client.
+    //
+    // NOT verified end to end: nobody has watched a real editor take this 404
+    // and re-initialize. The status is what the spec and the SDK server agree
+    // on; the client's behaviour is Quinn's test, and it is the acceptance for
+    // this change rather than a detail after it.
+    console.log('[Streamable HTTP] Unknown session, asking the client to start a new one:', sessionId);
+    return res.status(404).json({
+      error: 'Session not found',
+      error_description:
+        'This session is not held by the server — it expired, or the server restarted. ' +
+        'Send an initialize request to start a new one.',
     });
-
-    const server = await sessionManager.restoreSession(sessionId, transport);
-    if (!server) {
-      return res.status(500).json({
-        error: 'Failed to restore session from Redis',
-      });
-    }
-  } else if (isInitializeRequest(req.body)) {
+  } else if (route === 'create') {
     // New session - validate and create
-    let projectInfo = oauthToken ? await resolveProjectFromToken(oauthToken) : null;
+    let projectInfo: ResolvedProject | null = null;
+    if (oauthToken) {
+      const resolution = await resolveProject(oauthToken);
+      // A platform we could not reach is not a sign-in that has gone bad, so it
+      // must not fall through to the challenge below.
+      if (resolution.outcome === 'unavailable') return sendUnavailable(res);
+      if (resolution.outcome === 'resolved') projectInfo = resolution.project;
+    }
 
     if (!projectInfo) {
       if (!legacyApiKey && !oauthToken) {
@@ -1137,22 +1319,19 @@ app.get(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
 
   const runtime = sessionManager.getStreamableSession(sessionId);
   if (!runtime) {
-    if (await sessionManager.hasSession(sessionId)) {
-      return res.status(400).json({
-        error: 'Session exists but not active. Send a POST request to restore the session first.',
-      });
-    }
+    // The "exists but not active" branch is gone with the store that made it
+    // possible: a session this process does not hold does not exist anywhere.
     return res.status(404).json({
       error: 'Session not found. Initialize first with POST request.',
     });
   }
 
   // This stream is the only sign of life for a client that opens it and then
-  // sends nothing. Hold the session for as long as it is open, and restart the
-  // Redis record's clock now so a restart can still restore the session.
+  // sends nothing. Hold the session for as long as it is open, and start the
+  // idle clock now rather than from whenever the last POST arrived.
   sessionManager.openStream(sessionId);
   res.on('close', () => sessionManager.closeStream(sessionId));
-  await sessionManager.touchSession(sessionId);
+  sessionManager.touchSession(sessionId);
 
   await runtime.transport.handleRequest(req, res, req.body);
 });
@@ -1174,12 +1353,7 @@ app.delete(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) =>
 
   const runtime = sessionManager.getStreamableSession(sessionId);
   if (!runtime) {
-    if (await sessionManager.hasSession(sessionId)) {
-      await sessionManager.deleteSession(sessionId);
-      return res.status(200).json({
-        message: 'Session deleted from storage.',
-      });
-    }
+    // Likewise: there is no record to delete separately from the session.
     return res.status(404).json({
       error: 'Session not found.',
     });
@@ -1213,7 +1387,12 @@ app.get(SSE_ENDPOINTS.sse, async (req: Request, res: Response) => {
   const { apiKey: legacyApiKey, apiBaseUrl: legacyApiBaseUrl } = extractLegacyHeaders(req);
 
   // Resolve project info
-  let projectInfo = oauthToken ? await resolveProjectFromToken(oauthToken) : null;
+  let projectInfo: ResolvedProject | null = null;
+  if (oauthToken) {
+    const resolution = await resolveProject(oauthToken);
+    if (resolution.outcome === 'unavailable') return sendUnavailable(res);
+    if (resolution.outcome === 'resolved') projectInfo = resolution.project;
+  }
 
   if (!projectInfo) {
     if (!legacyApiKey && !oauthToken) {
@@ -1359,15 +1538,11 @@ app.post(SSE_ENDPOINTS.messages, async (req: Request, res: Response) => {
     });
   }
 
-  // Streamable HTTP refreshes the Redis record on every request; the SSE path
-  // did not, so an SSE record lapsed 24h after creation however active the
-  // client was, and /health under-reported live SSE sessions. Fire-and-forget:
-  // a failed refresh must not fail the message.
-  getSessionManager()
-    .touchSession(sessionId)
-    .catch((error) => {
-      console.error(`[SSE] Failed to refresh session ${tokenFingerprint(sessionId)}`, error);
-    });
+  // The streamable path stamps a session on every request; the SSE path did
+  // not, so an SSE session read as idle from creation however active the client
+  // was. Kept — it is still the only thing that marks an SSE session alive.
+  // It can no longer fail, so it no longer needs a catch.
+  getSessionManager().touchSession(sessionId);
 
   await transport.handlePostMessage(req, res, req.body);
 });
@@ -1381,43 +1556,17 @@ async function startServer() {
     // Validate configuration
     validateConfig();
 
-    // Redis is on its way out of this server, and until the last use is gone a
-    // deploy without it should still boot. It used to exit 1 here, before
-    // app.listen, so nothing was reachable — not /health, not discovery, not
-    // even a log line naming the cause once the container had looped a few
-    // times. A server that answers and refuses to sign anyone in is far more
-    // diagnosable than one that is not there.
-    if (isRedisConfigured()) {
-      const redis = getRedisClient();
-      await redis.ping();
-      console.log('[Redis] Connection verified');
-
-      // Runtime sessions are only dropped on an explicit DELETE, which
-      // Streamable HTTP clients rarely send. Reap the ones Redis has already
-      // expired. Nothing to sweep when there is no Redis to expire them.
-      getSessionManager().startIdleSweep(SESSION_SWEEP_MS);
-    } else {
-      // Measured rather than assumed: with no Redis, /health and all four
-      // discovery documents answer 200 and POST /mcp gives its 401 challenge,
-      // which is everything needed to prove the edge routes us. /oauth/* still
-      // 500s — registration and auth state are the next slices — so the list
-      // below says so instead of promising a login that will not complete.
-      console.warn(
-        '[Redis] Not configured (no REDIS_URL or REDIS_HOST). ' +
-          'The whole OAuth path now runs without it — registration, sign-in, ' +
-          'tokens. Only MCP SESSIONS still need Redis; /mcp and /sse will fail ' +
-          'until those move in-process.'
-      );
-    }
+    // Unconditional, where it used to be gated on Redis being configured.
+    //
+    // That gate was right when Redis owned session lifetime and this timer only
+    // reclaimed the instances left behind. Now this IS session expiry: nothing
+    // else drops a session that a client walked away from, so a server that
+    // does not start the sweep leaks every session it ever creates until the
+    // heap runs out. Roughly 252 kB per session against this machine's ~493 MB
+    // heap limit — about 2,000 — so "leaks" means hours, not months.
+    getSessionManager().startIdleSweep(SESSION_SWEEP_MS);
 
     const server = app.listen(SERVER_CONFIG.port, SERVER_CONFIG.host, () => {
-      const redisConfig = getRedisConfig();
-      // The banner used to print "localhost:6379" whether or not anything was
-      // there, which is the same shape of lie as the REDIS_PASSWORD that looked
-      // configured and never reached ioredis. Print what is true.
-      const redisLine = isRedisConfigured()
-        ? `${redisConfig.host}:${redisConfig.port} (TLS: ${redisConfig.tls}, Cluster: ${redisConfig.cluster})`
-        : 'not configured — OAuth works; MCP sessions unavailable';
       console.log(`
 ╔═══════════════════════════════════════════════════════════════════════╗
 ║              Insforge MCP Remote Server (OAuth)                       ║
@@ -1468,7 +1617,7 @@ async function startServer() {
    • Bind:       POST ${SERVER_CONFIG.publicUrl}${API_ENDPOINTS.bindProject}
 
 💾 Configuration:
-   • Redis:      ${redisLine}
+   • Sessions:   in this process only — a restart ends them
    • Insforge:   ${INSFORGE_CONFIG.apiBase}
    • Frontend:   ${INSFORGE_CONFIG.frontendUrl}
    • Analytics:  ${isAnalyticsConfigured() ? 'Mixpanel enabled' : 'Disabled (set MIXPANEL_TOKEN)'}
@@ -1505,12 +1654,6 @@ async function startServer() {
           console.error('[Shutdown] Error closing sessions:', error);
         }
 
-        // Close Redis connection
-        try {
-          await closeRedisClient();
-        } catch (error) {
-          console.error('[Shutdown] Error closing Redis client:', error);
-        }
       } finally {
         // Always close the HTTP server, even if cleanup fails
         server.close(() => {
