@@ -45,6 +45,9 @@ import {
   isAcceptableClientState,
   MAX_CLIENT_STATE_LENGTH,
 } from './auth-state-cookie.js';
+import { ACCESS_TOKEN_TTL_SECONDS, readAccessToken } from './access-token.js';
+import { getProjectKeyCache } from './project-key-cache.js';
+import { accessTokenKey } from './config.js';
 import { statusForHttpError } from './error-status.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
 
@@ -786,7 +789,7 @@ app.post(OAUTH_ENDPOINTS.token, async (req: Request, res: Response) => {
 
     try {
       const oauthManager = getOAuthManager();
-      const { tokenHash } = await oauthManager.exchangeCode(
+      const { accessToken } = await oauthManager.exchangeCode(
         code as string,
         redirect_uri as string,
         code_verifier as string | undefined
@@ -798,9 +801,13 @@ app.post(OAUTH_ENDPOINTS.token, async (req: Request, res: Response) => {
       });
 
       res.json({
-        access_token: tokenHash,
+        access_token: accessToken,
         token_type: 'Bearer',
-        expires_in: 30 * 24 * 60 * 60,
+        // 24 hours, not the binding's 30 days. A value that cannot be revoked
+        // directly should not live for a month, and the platform token sealed
+        // inside has its own expiry — whichever runs out first ends the
+        // session, which is the safe direction.
+        expires_in: ACCESS_TOKEN_TTL_SECONDS,
         scope: 'mcp:read mcp:write',
       });
     } catch (error) {
@@ -851,13 +858,25 @@ app.post(OAUTH_ENDPOINTS.revoke, async (req: Request, res: Response) => {
     });
   }
 
+  // There is no row to delete any more: the token carries its own record. What
+  // we CAN do is drop the cached project key, so the very next call re-asks the
+  // platform instead of using a key we already fetched — and the platform is
+  // where revocation is actually enforced (validateAccessToken checks
+  // `revoked` on every call).
+  //
+  // RFC 7009 §2.2 wants 200 whatever happens, including for a token we do not
+  // recognise, so that this endpoint cannot be used to probe which tokens are
+  // real. That was already the behaviour and it stays.
   try {
-    const oauthManager = getOAuthManager();
-    await oauthManager.revokeBinding(token as string);
-    res.status(200).send();
+    const payload = readAccessToken(token as string, accessTokenKey());
+    if (payload) {
+      getProjectKeyCache().forgetUser(payload.userId);
+      console.log(`[OAuth] Cached project keys dropped for ${payload.userId} on revoke`);
+    }
   } catch {
-    res.status(200).send();
+    // Deliberately swallowed: see above.
   }
+  res.status(200).send();
 });
 
 // ============================================================================
@@ -875,9 +894,24 @@ app.get(API_ENDPOINTS.projects, async (req: Request, res: Response) => {
 
   const token = authHeader.substring(7);
 
+  // UNSEAL FIRST. This handed our own bearer straight to the platform, which
+  // worked only while the bearer WAS a platform token. Since the token became a
+  // sealed envelope, the platform receives a string it has never issued and
+  // answers 401 — so `/api/projects` has been broken for every caller, and with
+  // it `list-projects`, the capability this whole design exists to enable.
+  //
+  // The bug is the shape the sealed token invites: every place that used to
+  // forward the bearer now has to open it and forward what is INSIDE. This was
+  // the last one, and it was missed because nothing calls this endpoint in
+  // tests — the project-selection page is its only real caller.
+  const payload = readAccessToken(token, accessTokenKey());
+  if (!payload) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+
   try {
     const oauthManager = getOAuthManager();
-    const projects = await oauthManager.getAvailableProjects(token);
+    const projects = await oauthManager.getAvailableProjects(payload.platformAccessToken);
     res.json({ organizations: projects });
   } catch (error) {
     console.error('Get projects error:', error);
@@ -900,18 +934,44 @@ app.post(API_ENDPOINTS.bindProject, async (req: Request, res: Response) => {
   const token = authHeader.substring(7);
   const projectId = req.params.projectId as string;
 
+  // A token can no longer be re-pointed at another project, because there is no
+  // row to update — the project is sealed inside the token the client already
+  // holds. Saying so is better than the alternatives: silently doing nothing
+  // would look like success, and issuing a NEW token here would hand a caller a
+  // credential through an endpoint that never authenticated anyone.
   try {
-    const oauthManager = getOAuthManager();
-    const binding = await oauthManager.bindTokenToProject(token, projectId);
+    const payload = readAccessToken(token, accessTokenKey());
+    if (!payload) {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
 
-    res.json({
-      success: true,
-      project: {
-        id: binding.projectId,
-        name: binding.projectName,
-        organizationId: binding.organizationId,
-      },
-      message: 'Token successfully bound to project. You can now use this token with the MCP endpoint.',
+    if (payload.projectId === projectId) {
+      // Already there. Idempotent rather than an error: a client retrying is
+      // not making a mistake.
+      //
+      // The id and nothing else. This used to echo the project's name and
+      // organization out of the token, and those two fields are exactly what
+      // made the sealed payload unbounded — a project name has no maximum
+      // length upstream. They are display data, so they left the credential
+      // (access-token.ts) rather than staying in it to serve one response body.
+      //
+      // Re-fetching them here to keep the shape was the tempting move and the
+      // wrong one: it would put a platform round-trip, and a platform outage,
+      // in the path of an endpoint that answers purely from the token today.
+      return res.json({
+        success: true,
+        project: { id: payload.projectId },
+        message: 'This token is already scoped to that project.',
+      });
+    }
+
+    return res.status(409).json({
+      error: 'Token is scoped to a different project',
+      details:
+        `This token is scoped to ${payload.projectId} and cannot be re-pointed: the project ` +
+        'is part of the token rather than a server-side record. Authorize again to get a token ' +
+        'for another project.',
+      currentProjectId: payload.projectId,
     });
   } catch (error) {
     console.error('Bind project error:', error);
@@ -979,8 +1039,8 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
 
       if (oauthToken && !legacyApiBaseUrl) {
         return sendUnauthorized(res, {
-          error: 'project_binding_required',
-          error_description: 'OAuth token is valid but not bound to a project. Complete the OAuth flow or call POST /api/projects/{projectId}/bind',
+          error: 'authorization_required',
+          error_description: 'Your sign-in is no longer valid for this project — the platform refused it, or it expired. Authorize again. Complete the OAuth flow or call POST /api/projects/{projectId}/bind',
           oauth_authorize_url: `${SERVER_CONFIG.publicUrl}${OAUTH_ENDPOINTS.authorize}`,
           projects_url: `${SERVER_CONFIG.publicUrl}${API_ENDPOINTS.projects}`,
         }, STREAMABLE_HTTP_ENDPOINTS.mcp);
@@ -1165,8 +1225,8 @@ app.get(SSE_ENDPOINTS.sse, async (req: Request, res: Response) => {
 
     if (oauthToken && !legacyApiBaseUrl) {
       return sendUnauthorized(res, {
-        error: 'project_binding_required',
-        error_description: 'OAuth token is valid but not bound to a project. Complete the OAuth flow.',
+        error: 'authorization_required',
+        error_description: 'Your sign-in is no longer valid for this project — the platform refused it, or it expired. Authorize again. Complete the OAuth flow.',
       }, SSE_ENDPOINTS.sse);
     }
 
@@ -1344,8 +1404,9 @@ async function startServer() {
       // below says so instead of promising a login that will not complete.
       console.warn(
         '[Redis] Not configured (no REDIS_URL or REDIS_HOST). ' +
-          'Serving /health, discovery and the 401 challenge; /oauth/* and every ' +
-          'session path will fail until the remaining Redis uses are removed.'
+          'The whole OAuth path now runs without it — registration, sign-in, ' +
+          'tokens. Only MCP SESSIONS still need Redis; /mcp and /sse will fail ' +
+          'until those move in-process.'
       );
     }
 
@@ -1356,7 +1417,7 @@ async function startServer() {
       // configured and never reached ioredis. Print what is true.
       const redisLine = isRedisConfigured()
         ? `${redisConfig.host}:${redisConfig.port} (TLS: ${redisConfig.tls}, Cluster: ${redisConfig.cluster})`
-        : 'not configured — /oauth/* and sessions unavailable';
+        : 'not configured — OAuth works; MCP sessions unavailable';
       console.log(`
 ╔═══════════════════════════════════════════════════════════════════════╗
 ║              Insforge MCP Remote Server (OAuth)                       ║

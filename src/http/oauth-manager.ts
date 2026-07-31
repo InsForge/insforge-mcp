@@ -1,8 +1,9 @@
 import { createHash, randomBytes } from 'crypto';
-import { getRedisClient } from './redis.js';
 import { sealAuthState, openAuthState, InvalidAuthStateError } from './auth-state.js';
+import { issueAccessToken, readAccessToken } from './access-token.js';
+import { getProjectKeyCache } from './project-key-cache.js';
 import { newStateHandle } from './auth-state-cookie.js';
-import { authStateKey, authCodeKey } from './config.js';
+import { authStateKey, authCodeKey, accessTokenKey } from './config.js';
 import {
   validateToken,
   getProjectAccess,
@@ -39,7 +40,7 @@ export function generateState(): string {
 }
 
 /**
- * OAuth authorization state stored in Redis
+ * OAuth authorization state, sealed into a cookie rather than stored
  * Used during the OAuth flow before token exchange
  *
  * This stores both:
@@ -84,29 +85,9 @@ interface AuthorizationState {
   createdAt: number;
 }
 
-/**
- * Token binding stored in Redis
- * Links an OAuth token to a specific project
- */
-interface TokenBinding {
-  tokenHash: string;
-  userId: string;
-  userEmail: string;
-  projectId: string;
-  projectName: string;
-  organizationId: string;
-  accessHost: string;
-  apiKey: string;
-  createdAt: number;
-  lastUsedAt: number;
-}
-
-// Redis key prefixes
-const TOKEN_BINDING_PREFIX = 'mcp:auth:binding:';
 
 // TTLs
 const AUTH_CODE_TTL = 5 * 60; // 5 minutes
-const TOKEN_BINDING_TTL = 30 * 24 * 60 * 60; // 30 days
 
 /**
  * Generate a hash of the token for storage
@@ -215,8 +196,6 @@ export class OAuthManager {
     token: string,
     projectId: string
   ): Promise<string> {
-    const redis = getRedisClient();
-
     // Validate the state exists
     const authState = await this.getAuthorizationState(stateId, handle);
     if (!authState) {
@@ -226,30 +205,26 @@ export class OAuthManager {
     // Validate token and get user info
     const user = await validateToken(token);
 
-    // Get project access info
+    // Still called for its refusal, not for its return value: this is where we
+    // find out the signed-in user may actually reach the project they picked.
+    // Everything it returns beyond the id is re-fetched per request through the
+    // project-key cache, so none of it is sealed into the token — see
+    // access-token.ts for why a caller-influenced field in there is a denial of
+    // service against everyone who shares the project.
     const projectAccess = await getProjectAccess(token, projectId);
 
-    // Create token binding
-    const tokenHash = hashToken(token);
-    const binding: TokenBinding = {
-      tokenHash,
-      userId: user.id,
-      userEmail: user.email,
-      projectId: projectAccess.projectId,
-      projectName: projectAccess.projectName,
-      organizationId: projectAccess.organizationId,
-      accessHost: projectAccess.accessHost,
-      apiKey: projectAccess.apiKey,
-      createdAt: Date.now(),
-      lastUsedAt: Date.now(),
-    };
-
-    // Store the binding
-    await redis.setex(
-      TOKEN_BINDING_PREFIX + tokenHash,
-      TOKEN_BINDING_TTL,
-      JSON.stringify(binding)
+    const accessToken = issueAccessToken(
+      {
+        userId: user.id,
+        platformAccessToken: token,
+        projectId: projectAccess.projectId,
+      },
+      accessTokenKey()
     );
+
+    // No binding row: the access token IS the record. See access-token.ts for
+    // why the platform token goes in and the project API key deliberately does
+    // not.
 
     // PKCE is REQUIRED for a sealed code, and this is the one place the
     // stateless rewrite genuinely tightens behaviour rather than preserving it.
@@ -276,7 +251,7 @@ export class OAuthManager {
     // §4.1.2 wants a code short-lived, and a replayable one wants it more.
     const code = sealAuthState(
       {
-        tokenHash,
+        accessToken,
         redirectUri: authState.redirectUri,
         codeChallenge: authState.codeChallenge,
         codeChallengeMethod: authState.codeChallengeMethod,
@@ -308,11 +283,11 @@ export class OAuthManager {
     code: string,
     redirectUri: string,
     codeVerifier?: string
-  ): Promise<{ tokenHash: string }> {
+  ): Promise<{ accessToken: string }> {
     // No GETDEL, because there is nothing stored. Replay is bounded by PKCE
     // (required at issue time) and by the five-minute expiry sealed inside.
     let payload: {
-      tokenHash: string;
+      accessToken: string;
       redirectUri: string;
       codeChallenge?: string;
       codeChallengeMethod?: string;
@@ -323,7 +298,7 @@ export class OAuthManager {
       throw new Error('Invalid or expired authorization code');
     }
 
-    const { tokenHash, redirectUri: storedRedirectUri, codeChallenge, codeChallengeMethod } = payload;
+    const { accessToken, redirectUri: storedRedirectUri, codeChallenge, codeChallengeMethod } = payload;
 
     // Validate redirect URI
     if (redirectUri !== storedRedirectUri) {
@@ -356,68 +331,16 @@ export class OAuthManager {
       }
     }
 
-    return { tokenHash };
+    return { accessToken };
   }
-
   /**
-   * Get token binding by token hash
-   */
-  async getTokenBinding(tokenHash: string): Promise<TokenBinding | null> {
-    const redis = getRedisClient();
-    const data = await redis.get(TOKEN_BINDING_PREFIX + tokenHash);
-
-    if (!data) {
-      return null;
-    }
-
-    return JSON.parse(data) as TokenBinding;
-  }
-
-  /**
-   * Get token binding by raw token
-   */
-  async getBindingByToken(token: string): Promise<TokenBinding | null> {
-    const tokenHash = hashToken(token);
-    return this.getTokenBinding(tokenHash);
-  }
-
-  /**
-   * Update last used time for a token binding
-   */
-  async touchBinding(tokenHash: string): Promise<void> {
-    const redis = getRedisClient();
-    const binding = await this.getTokenBinding(tokenHash);
-
-    if (binding) {
-      binding.lastUsedAt = Date.now();
-      await redis.setex(
-        TOKEN_BINDING_PREFIX + tokenHash,
-        TOKEN_BINDING_TTL,
-        JSON.stringify(binding)
-      );
-    }
-  }
-
-  /**
-   * Revoke a token binding
-   */
-  async revokeBinding(tokenHash: string): Promise<void> {
-    const redis = getRedisClient();
-    await redis.del(TOKEN_BINDING_PREFIX + tokenHash);
-  }
-
-  /**
-   * Resolve project info from OAuth token or tokenHash
-   * This is the main entry point used by the MCP server
+   * Everything a tool call needs, from the token alone plus one cached lookup.
    *
-   * The token parameter can be either:
-   * 1. A tokenHash (returned by /oauth/token endpoint) - used by MCP clients after OAuth
-   * 2. A raw Insforge OAuth token - used for direct API access
-   *
-   * Flow:
-   * 1. Try to find binding using token directly as tokenHash
-   * 2. If not found, try hashing the token and look up again
-   * 3. If still not found, return null (client needs to go through OAuth flow)
+   * The token used to BE the Redis key; now it carries its own record. What it
+   * deliberately does not carry is the project API key — that is fetched here,
+   * from a 60-second cache, so the platform stays the authority on revocation.
+   * See project-key-cache.ts for why that TTL is fixed rather than bounded by
+   * the token's own expiry.
    */
   async resolveProjectFromToken(token: string): Promise<{
     apiKey: string;
@@ -428,33 +351,51 @@ export class OAuthManager {
     organizationId: string;
     oauthTokenHash: string;
   } | null> {
-    // First, try using the token directly as a tokenHash
-    // This handles the case where MCP clients send the tokenHash from /oauth/token
-    let binding = await this.getTokenBinding(token);
-    let actualTokenHash = token;
-
-    if (!binding) {
-      // Try hashing the token (in case it's a raw Insforge token)
-      actualTokenHash = hashToken(token);
-      binding = await this.getTokenBinding(actualTokenHash);
-    }
-
-    if (!binding) {
-      // No binding found - client needs to complete OAuth flow
+    const payload = readAccessToken(token, accessTokenKey());
+    if (!payload) {
+      // Not ours, tampered, or expired — all the same 401 to a caller, and
+      // deliberately indistinguishable so nothing downstream can branch on it.
       return null;
     }
 
-    // Update last used time
-    await this.touchBinding(actualTokenHash);
+    const cache = getProjectKeyCache();
+    let key = cache.get(payload.userId, payload.projectId);
+
+    if (!key) {
+      // Asked afresh, which is what makes a revoked grant stop working within
+      // the cache TTL rather than at the end of the token's life.
+      try {
+        const access = await getProjectAccess(payload.platformAccessToken, payload.projectId);
+        key = {
+          apiKey: access.apiKey,
+          accessHost: access.accessHost,
+          projectName: access.projectName,
+          organizationId: access.organizationId,
+        };
+        cache.set(payload.userId, payload.projectId, key);
+      } catch (error) {
+        // A refusal here is the platform saying this user may no longer reach
+        // this project. That is a 401 for the caller, not a 500 — the request
+        // is well-formed and our server is fine.
+        console.log(
+          `[OAuth] Project access refused for ${payload.userId}: ${
+            error instanceof Error ? error.message : 'unknown'
+          }`
+        );
+        return null;
+      }
+    }
 
     return {
-      apiKey: binding.apiKey,
-      apiBaseUrl: binding.accessHost,
-      projectId: binding.projectId,
-      projectName: binding.projectName,
-      userId: binding.userId,
-      organizationId: binding.organizationId,
-      oauthTokenHash: actualTokenHash,
+      apiKey: key.apiKey,
+      apiBaseUrl: key.accessHost,
+      projectId: payload.projectId,
+      projectName: key.projectName,
+      userId: payload.userId,
+      organizationId: key.organizationId,
+      // A hash of the bearer, never the bearer itself — the analytics and
+      // session fields want an opaque handle and nothing more.
+      oauthTokenHash: hashToken(token),
     };
   }
 
@@ -466,45 +407,6 @@ export class OAuthManager {
     projects: Project[];
   }>> {
     return getAllUserProjects(token);
-  }
-
-  /**
-   * Bind a token to a project directly (skip OAuth code flow)
-   * Used when user selects a project via API
-   */
-  async bindTokenToProject(token: string, projectId: string): Promise<TokenBinding> {
-    const redis = getRedisClient();
-
-    // Validate token and get user info
-    const user = await validateToken(token);
-
-    // Get project access info
-    const projectAccess = await getProjectAccess(token, projectId);
-
-    // Create token binding
-    const tokenHash = hashToken(token);
-    const binding: TokenBinding = {
-      tokenHash,
-      userId: user.id,
-      userEmail: user.email,
-      projectId: projectAccess.projectId,
-      projectName: projectAccess.projectName,
-      organizationId: projectAccess.organizationId,
-      accessHost: projectAccess.accessHost,
-      apiKey: projectAccess.apiKey,
-      createdAt: Date.now(),
-      lastUsedAt: Date.now(),
-    };
-
-    // Store the binding
-    await redis.setex(
-      TOKEN_BINDING_PREFIX + tokenHash,
-      TOKEN_BINDING_TTL,
-      JSON.stringify(binding)
-    );
-
-    console.log(`[OAuthManager] Token bound to project: ${projectAccess.projectName}`);
-    return binding;
   }
 }
 

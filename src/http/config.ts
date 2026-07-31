@@ -201,6 +201,26 @@ export function authCodeKey(): Buffer {
   return deriveAuthCodeKey(INSFORGE_CONFIG.clientSecret);
 }
 
+/**
+ * And a fourth, for the access token we issue to MCP clients.
+ *
+ * Fourth purpose, fourth label, no relationship to the other three. This one
+ * seals the most valuable envelope we produce — it carries the platform access
+ * token — so it is the one that most needs its own key.
+ */
+const ACCESS_TOKEN_KEY_LABEL = 'mcp-access-token-v1';
+
+export function deriveAccessTokenKey(clientSecret: string): Buffer {
+  if (!clientSecret) {
+    throw new Error('INSFORGE_CLIENT_SECRET is required: the access token key is derived from it');
+  }
+  return createHmac('sha256', clientSecret).update(ACCESS_TOKEN_KEY_LABEL).digest();
+}
+
+export function accessTokenKey(): Buffer {
+  return deriveAccessTokenKey(INSFORGE_CONFIG.clientSecret);
+}
+
 // ============================================================================
 // Redis Configuration
 // ============================================================================
