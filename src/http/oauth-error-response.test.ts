@@ -193,3 +193,27 @@ describe('the repair clears every scope it can live in', () => {
     expect(add).toBeGreaterThan(lastRemove);
   });
 });
+
+describe('the page says where to run the commands', () => {
+  /**
+   * Project scope is CWD-relative, so both removes miss a project entry
+   * written somewhere else. Blair measured it:
+   *
+   *   entry in ~/projA/.mcp.json, run from ~/projB
+   *     remove <url> -y      "No matching servers found"
+   *     remove <url> -g -y   "No matching servers found"
+   *     projA entry          STILL THERE
+   *
+   * Both results are honest — there is nothing to remove where they looked —
+   * and the user is still broken. That is the same silent-partial-success one
+   * directory over, and the only fix available to a page is to say where to
+   * stand. A sentence, not a command.
+   */
+
+  it('tells the reader which directory to run them from', () => {
+    for (const error of ['invalid_client', 'invalid_request']) {
+      const { message } = humanFormOf({ error }, MCP_URL);
+      expect(message).toMatch(/project directory/);
+    }
+  });
+});

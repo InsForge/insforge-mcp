@@ -187,7 +187,8 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
           'authorisation for this server that this server no longer recognises, and it will keep ' +
           'reusing it until you clear it. In Claude Code: run /mcp, pick this server, and choose ' +
           'Clear authentication. In Codex: run the first command below. Then reconnect with the ' +
-          'last one.',
+          'last one. Run the commands from the project directory where you use InsForge — one of ' +
+          'them only looks there.',
         action: reconnectCommand(mcpUrl),
       };
 
@@ -202,7 +203,9 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
           'The address your app asked us to send you back to is not the one it registered — ' +
           'usually because it restarted on a different port. Clearing the saved authorisation is ' +
           'what fixes it. In Claude Code: run /mcp, pick this server, and choose Clear ' +
-          'authentication. In Codex: run the first command below. Then reconnect with the last.',
+          'authentication. In Codex: run the first command below. Then reconnect with the last. ' +
+          'Run the commands from the project directory where you use InsForge — one of them only ' +
+          'looks there.',
         action: reconnectCommand(mcpUrl),
       };
 
