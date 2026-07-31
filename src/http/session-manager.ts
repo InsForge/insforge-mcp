@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
@@ -5,6 +6,23 @@ import { SESSION_SWEEP_MS } from './config.js';
 import { registerInsforgeTools } from '../shared/tools/index.js';
 import { sdkToolHost } from '../shared/tools/host.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
+
+/**
+ * A session id, safe to log.
+ *
+ * An existing session is served without a token check — Mcp-Session-Id alone
+ * yields the stored project key and full tool access — so it is a bearer
+ * credential and belongs in a log the way a token does: not at all. Manufact
+ * serves its runtime logs over an API, which makes a raw id there a live
+ * credential at rest rather than a routing breadcrumb.
+ *
+ * Deterministic, so the same session prints the same value at every site and a
+ * support report still correlates. Same construction as server.ts’s
+ * tokenFingerprint, deliberately: two equivalent credentials, one treatment.
+ */
+export function sessionFingerprint(sessionId: string | undefined | null): string {
+  return sessionId ? createHash('sha256').update(sessionId).digest('hex').substring(0, 8) : 'none';
+}
 
 /**
  * Sessions, and the honest limit of "stateless".
@@ -267,7 +285,7 @@ export class SessionManager {
       openStreams: 0,
     });
 
-    console.log(`[SessionManager] Session created: ${sessionId}`);
+    console.log(`[SessionManager] Session created: ${sessionFingerprint(sessionId)}`);
     return server;
   }
 
@@ -372,7 +390,7 @@ export class SessionManager {
       openStreams: 0,
     });
 
-    console.log(`[SessionManager] SSE session created: ${sessionId}`);
+    console.log(`[SessionManager] SSE session created: ${sessionFingerprint(sessionId)}`);
     return server;
   }
 
@@ -441,14 +459,14 @@ export class SessionManager {
       await runtime.server.close();
       await runtime.transport.close();
     } catch (error) {
-      console.error(`[SessionManager] Error closing session ${sessionId}:`, error);
+      console.error(`[SessionManager] Error closing session ${sessionFingerprint(sessionId)}:`, error);
     }
     // Outside the try: a close that throws must still drop the entry, or a
     // session that failed to shut down cleanly is held for the life of the
     // process and never swept — the sweep only reaps what it can close.
     this.runtimeSessions.delete(sessionId);
 
-    console.log(`[SessionManager] Session deleted: ${sessionId}`);
+    console.log(`[SessionManager] Session deleted: ${sessionFingerprint(sessionId)}`);
   }
 
   /**
