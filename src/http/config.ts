@@ -20,6 +20,21 @@ const cliOptions = program.opts();
 // Server Configuration
 // ============================================================================
 
+/**
+ * A base URL with any trailing slash removed.
+ *
+ * Exported and applied once at the source rather than at each consumer,
+ * because there are ten of them — the AS metadata, the OAuth callback we
+ * register with the platform, the project-selection redirect, two authorize
+ * URLs in error bodies, the projects URL and the startup banner. A configured
+ * MCP_SERVER_URL ending in / gave every one a doubled slash, and Express
+ * matches none of those routes. Guarding the two I first noticed left the
+ * other eight, and left the next consumer free to reintroduce it.
+ */
+export function normaliseBaseUrl(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
 export const SERVER_CONFIG = {
   /** Port to run HTTP server on */
   port: parseInt(cliOptions.port) || 3000,
@@ -28,7 +43,7 @@ export const SERVER_CONFIG = {
   host: cliOptions.host || '127.0.0.1',
 
   /** Public URL of this MCP server */
-  publicUrl: process.env.MCP_SERVER_URL || 'http://localhost:3000',
+  publicUrl: normaliseBaseUrl(process.env.MCP_SERVER_URL || 'http://localhost:3000'),
 } as const;
 
 // ============================================================================
