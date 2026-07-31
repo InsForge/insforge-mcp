@@ -57,12 +57,17 @@ const TAG_BYTES = 16;
  * covered by the authentication tag and cannot be extended by an attacker who
  * holds the blob.
  */
-export function sealAuthState<T>(value: T, key: Buffer, nowMs: number = Date.now()): string {
+export function sealAuthState<T>(
+  value: T,
+  key: Buffer,
+  nowMs: number = Date.now(),
+  ttlSeconds: number = AUTH_STATE_TTL_SECONDS
+): string {
   assertKey(key);
 
   const payload = JSON.stringify({
     v: value,
-    exp: nowMs + AUTH_STATE_TTL_SECONDS * 1000,
+    exp: nowMs + ttlSeconds * 1000,
   });
 
   const nonce = randomBytes(NONCE_BYTES);
