@@ -93,8 +93,31 @@ const MAX_CLIENT_ID_LENGTH = 4096;
  * what actually arrives. An allowlist of https + loopback http + dotted schemes
  * is the more principled rule and it would reject working clients today, which
  * is the failure this whole module exists to stop happening silently.
+ *
+ * The membership is set by measurement, not by taste. A reviewer proposed a
+ * structural rule instead — reject anything whose scheme is not http(s) and
+ * does not look like a private-use scheme. Running that rule against the six
+ * examples it was offered for closed three of them and left `intent://`,
+ * `chrome://` and `about:blank` accepted, while reading as though it had closed
+ * all six. Probing the same six against the platform whose filter we match 12
+ * for 12 found it accepts five of them. Adopting the structural rule would have
+ * made us stricter than the thing we chose to copy, for the same reason we did
+ * not copy an allowlist: principled rules reject `cursor://`.
+ *
+ * `about:` is the one value where we genuinely diverged, so it is here.
+ *
+ * Exported so a test can assert the property over every member rather than
+ * over a hand-copied list — a test named for a class that checks five
+ * instances stops covering the sixth the moment one is added.
  */
-const FORBIDDEN_SCHEMES = new Set(['javascript:', 'data:', 'vbscript:', 'file:', 'blob:']);
+export const FORBIDDEN_SCHEMES: ReadonlySet<string> = new Set([
+  'javascript:',
+  'data:',
+  'vbscript:',
+  'file:',
+  'blob:',
+  'about:',
+]);
 
 /**
  * Is this a redirect_uri we are willing to sign?

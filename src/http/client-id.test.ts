@@ -5,6 +5,7 @@ import {
   readClientId,
   isRegisteredRedirectUri,
   isAcceptableRedirectUri,
+  FORBIDDEN_SCHEMES,
   InvalidClientIdError,
   InvalidRegistrationError,
 } from './client-id.js';
@@ -220,17 +221,55 @@ describe('isAcceptableRedirectUri', () => {
     }
   });
 
-  it('rejects script-capable and opaque schemes', () => {
+  it('rejects every scheme on the denylist, derived from the denylist', () => {
+    // This test used to be named for a class and assert five enumerated
+    // values, so adding a sixth scheme to the set left it uncovered while the
+    // name still promised the class. Derived from FORBIDDEN_SCHEMES now, so a
+    // scheme cannot be added to the set without being tested.
+    expect(FORBIDDEN_SCHEMES.size).toBeGreaterThan(0);
+    for (const scheme of FORBIDDEN_SCHEMES) {
+      expect(isAcceptableRedirectUri(`${scheme}whatever`), scheme).toBe(false);
+    }
+  });
+
+  it('rejects them however the scheme is cased', () => {
+    // RFC 3986 §3.1 — and URL normalisation is what makes the set lookup work.
+    for (const uri of ['JavaScript:alert(1)', 'DATA:text/html,x', 'File:///etc/passwd']) {
+      expect(isAcceptableRedirectUri(uri)).toBe(false);
+    }
+  });
+
+  it('rejects them in the shapes an attacker would actually write', () => {
+    // The derived test above proves the set is enforced; these pin the real
+    // payloads, which is a different claim.
     for (const uri of [
       'javascript:alert(1)',
-      'JavaScript:alert(1)',
       'data:text/html,<script>alert(1)</script>',
       'vbscript:msgbox(1)',
       'file:///etc/passwd',
       'blob:https://app.example/uuid',
+      'about:blank',
     ]) {
       expect(isAcceptableRedirectUri(uri)).toBe(false);
     }
+  });
+
+  it('matches the reference platform on the wrapper schemes, and diverges on one', () => {
+    // A reviewer proposed a structural rule for these six. Measured against the
+    // platform whose filter we match 12 for 12: it accepts five of them and
+    // rejects about:. Adopting the structural rule would have made us stricter
+    // than the thing we chose to copy — and this is the exact filter being
+    // ported to the platform, so a narrowing here propagates there.
+    for (const uri of [
+      'view-source:https://attacker.test/',
+      'jar:https://attacker.test/!/a',
+      'filesystem:https://attacker.test/temporary/a',
+      'intent://attacker.test/#Intent;scheme=https;end',
+      'chrome://settings',
+    ]) {
+      expect(isAcceptableRedirectUri(uri), uri).toBe(true);
+    }
+    expect(isAcceptableRedirectUri('about:blank')).toBe(false);
   });
 
   it('rejects relative and unparseable values', () => {

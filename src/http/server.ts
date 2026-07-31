@@ -281,7 +281,11 @@ app.post(OAUTH_ENDPOINTS.register, (req: Request, res: Response) => {
     });
   }
 
-  console.log(`[OAuth] Registered new client (${clientName})`);
+  // JSON.stringify, not interpolation: client_name is caller-supplied and only
+  // length-bounded, so a newline in it forges log lines — an attacker-chosen
+  // "[OAuth] ..." entry that reads exactly like ours. Quoting also makes
+  // trailing whitespace and empty names visible instead of silent.
+  console.log(`[OAuth] Registered new client (${JSON.stringify(clientName)})`);
 
   res.status(201).json({
     client_id: clientId,
