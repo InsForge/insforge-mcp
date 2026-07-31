@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { createHmac } from 'crypto';
 import { program } from 'commander';
 import { PACKAGE_VERSION } from '../shared/version.js';
 
@@ -88,6 +89,47 @@ export const OAUTH_CONFIG = {
   /** Code challenge methods supported (only S256 for security) */
   codeChallengesMethods: ['S256'],
 } as const;
+
+// ============================================================================
+// Client ID Signing Key
+// ============================================================================
+
+/**
+ * The key that signs client ids, derived rather than configured.
+ *
+ * No new environment variable: there are three, and a fourth that only this
+ * one feature needs would have to be generated, distributed and rotated by
+ * hand, and a server that booted without it would fail at the first
+ * registration rather than at boot.
+ *
+ * Derived from INSFORGE_CLIENT_SECRET through an HMAC with a fixed label, so
+ * the platform secret itself is never the signing key. That separation matters:
+ * a client id is public (it travels in every authorize URL), so its signatures
+ * are public samples of whatever key produced them. Deriving means those
+ * samples are of a key that can do nothing but sign client ids.
+ *
+ * Rotating INSFORGE_CLIENT_SECRET invalidates every client id, which is the
+ * intended and only revocation mechanism — see client-id.ts.
+ */
+const CLIENT_ID_KEY_LABEL = 'mcp-client-id-v1';
+
+export function deriveClientIdSigningKey(clientSecret: string): string {
+  if (!clientSecret) {
+    throw new Error(
+      'INSFORGE_CLIENT_SECRET is required: the client id signing key is derived from it'
+    );
+  }
+  return createHmac('sha256', clientSecret).update(CLIENT_ID_KEY_LABEL).digest('base64url');
+}
+
+/**
+ * Read lazily rather than at module load: config is imported by tests and by
+ * the stdio entry point, neither of which has platform credentials, and a
+ * throw at import time would take both down for a feature they never use.
+ */
+export function clientIdSigningKey(): string {
+  return deriveClientIdSigningKey(INSFORGE_CONFIG.clientSecret);
+}
 
 // ============================================================================
 // Redis Configuration

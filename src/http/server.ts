@@ -24,11 +24,20 @@ import {
   isOAuthConfigured,
   isAnalyticsConfigured,
   validateConfig,
+  clientIdSigningKey,
 } from './config.js';
 import { renderProjectSelectionPage } from './templates/project-selection.js';
 import { renderOAuthErrorPage } from './templates/oauth-error.js';
 import { getAnalyticsService, extractClientInfo } from './analytics.js';
 import { sendUnauthorized, protectedResourceMetadata } from './auth-challenge.js';
+import {
+  mintClientId,
+  readClientId,
+  isRegisteredRedirectUri,
+  InvalidClientIdError,
+  InvalidRegistrationError,
+  type ClientRegistration,
+} from './client-id.js';
 import { statusForHttpError } from './error-status.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
 
@@ -84,17 +93,6 @@ function isInitializeRequest(body: unknown): boolean {
 
   return false;
 }
-
-/**
- * How long a client registration survives without being used.
- *
- * Refreshed on every successful authorize (see below), so this is an idle
- * timeout rather than a hard lifetime. It used to be neither: the value was
- * written once at registration and never touched again, so every client
- * stopped working exactly 30 days after it registered no matter how heavily
- * it was being used.
- */
-const CLIENT_REGISTRATION_TTL = 30 * 24 * 60 * 60;
 
 /**
  * Whether this request is a browser navigation rather than a program's fetch.
@@ -246,7 +244,7 @@ app.get(OAUTH_ENDPOINTS.protectedResource, (_req: Request, res: Response) => {
 /**
  * OAuth Dynamic Client Registration (RFC 7591)
  */
-app.post(OAUTH_ENDPOINTS.register, async (req: Request, res: Response) => {
+app.post(OAUTH_ENDPOINTS.register, (req: Request, res: Response) => {
   const {
     client_name,
     redirect_uris,
@@ -256,43 +254,43 @@ app.post(OAUTH_ENDPOINTS.register, async (req: Request, res: Response) => {
     scope,
   } = req.body;
 
-  if (!redirect_uris || !Array.isArray(redirect_uris) || redirect_uris.length === 0) {
-    return res.status(400).json({
-      error: 'invalid_client_metadata',
-      error_description: 'redirect_uris is required and must be a non-empty array',
+  const clientName = typeof client_name === 'string' && client_name ? client_name : 'MCP Client';
+
+  // The registration is carried by the id itself, so nothing is written here.
+  // mintClientId validates redirect_uris — count, absoluteness, scheme, and
+  // loopback-only plaintext http — and rejects anything it would not be able to
+  // read back, which is why this route no longer pre-checks the array itself.
+  let clientId: string;
+  try {
+    clientId = mintClientId(
+      { redirect_uris, client_name: clientName },
+      clientIdSigningKey()
+    );
+  } catch (error) {
+    if (error instanceof InvalidRegistrationError) {
+      return res.status(400).json({
+        error: 'invalid_client_metadata',
+        error_description: error.message,
+      });
+    }
+    // A missing signing key is our misconfiguration, not the client's.
+    console.error('[OAuth] Could not mint a client id:', error);
+    return res.status(500).json({
+      error: 'server_error',
+      error_description: 'Client registration is not available on this server.',
     });
   }
 
-  const clientId = `mcp_${randomUUID().replace(/-/g, '')}`;
+  console.log(`[OAuth] Registered new client (${clientName})`);
 
-  const redis = getRedisClient();
-  const clientData = {
+  res.status(201).json({
     client_id: clientId,
-    client_name: client_name || 'MCP Client',
+    client_name: clientName,
     redirect_uris,
     grant_types: grant_types || OAUTH_CONFIG.grantTypes,
     response_types: response_types || ['code'],
     token_endpoint_auth_method: token_endpoint_auth_method || 'none',
     scope: scope || 'mcp:read mcp:write',
-    created_at: Date.now(),
-  };
-
-  await redis.setex(
-    `mcp:oauth:client:${clientId}`,
-    CLIENT_REGISTRATION_TTL,
-    JSON.stringify(clientData)
-  );
-
-  console.log(`[OAuth] Registered new client: ${clientId} (${clientData.client_name})`);
-
-  res.status(201).json({
-    client_id: clientId,
-    client_name: clientData.client_name,
-    redirect_uris: clientData.redirect_uris,
-    grant_types: clientData.grant_types,
-    response_types: clientData.response_types,
-    token_endpoint_auth_method: clientData.token_endpoint_auth_method,
-    scope: clientData.scope,
   });
 });
 
@@ -327,16 +325,31 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
     });
   }
 
-  // Validate client_id and redirect_uri
-  const redis = getRedisClient();
-  const clientKey = `mcp:oauth:client:${client_id}`;
-  const clientDataStr = await redis.get(clientKey);
-  if (!clientDataStr) {
+  // Recover the registration from the id. The signature is what makes this
+  // trustworthy: anyone can read a client id, only this server can mint one, so
+  // a redirect_uri that verifies is one we approved at registration.
+  let registration: ClientRegistration;
+  try {
+    registration = readClientId(client_id as string, clientIdSigningKey());
+  } catch (error) {
+    if (!(error instanceof InvalidClientIdError)) {
+      // A missing or unreadable signing key — our problem, not the caller's,
+      // and it must not be reported as an unknown client.
+      console.error('[OAuth] Could not read client id:', error);
+      return res.status(500).json({
+        error: 'server_error',
+        error_description: 'Client registration is not available on this server.',
+      });
+    }
     // Nothing here can recover automatically. The MCP SDK only re-registers on
     // an invalid_client from the token endpoint or from registration, and it
     // never sees this response — the browser does. So the person holding the
     // tab is the only one who can act, and they need to be told how.
-    console.log(`[OAuth] Unknown client_id at authorize: ${client_id}`);
+    //
+    // This is also the path every client registered before this change takes:
+    // its id names a Redis row that is no longer read. The page below is the
+    // correct answer for them too — re-register and it works.
+    console.log('[OAuth] Client id at authorize did not verify');
     if (prefersHtml(req)) {
       return res.status(400).type('html').send(
         renderOAuthErrorPage({
@@ -355,51 +368,20 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
     });
   }
 
-  let clientData: { client_id: string; redirect_uris: string[] };
-  try {
-    clientData = JSON.parse(clientDataStr);
-  } catch (parseError) {
-    console.error(`[OAuth] Failed to parse client data for client_id ${client_id}:`, parseError);
-    return res.status(500).json({
-      error: 'server_error',
-      error_description: 'Failed to read client registration data.',
-    });
-  }
-
-  // Validate required fields exist and have correct types
-  if (!clientData.client_id || typeof clientData.client_id !== 'string') {
-    console.error(`[OAuth] Invalid client data: missing or invalid client_id for ${client_id}`);
-    return res.status(500).json({
-      error: 'server_error',
-      error_description: 'Client registration data is corrupted.',
-    });
-  }
-
-  if (!Array.isArray(clientData.redirect_uris)) {
-    console.error(`[OAuth] Invalid client data: missing or invalid redirect_uris for ${client_id}`);
-    return res.status(500).json({
-      error: 'server_error',
-      error_description: 'Client registration data is corrupted.',
-    });
-  }
-
-  // Validate redirect_uri matches registered URIs
-  if (!clientData.redirect_uris.includes(redirect_uri as string)) {
+  // Exact match against what the client registered, per RFC 6749 §3.1.2.3.
+  // This is the check mcp-use's oauthProxy omits, and omitting it is
+  // authorization-code theft: the code would be delivered to whatever URI the
+  // request named.
+  if (!isRegisteredRedirectUri(registration, redirect_uri)) {
     return res.status(400).json({
       error: 'invalid_request',
       error_description: 'redirect_uri does not match any registered redirect URIs for this client.',
     });
   }
 
-  // The registration has been used successfully, so restart its idle clock.
-  // Without this the record expires on a fixed schedule from the moment it was
-  // written, taking working clients down with it. Failing to refresh must not
-  // fail the login — the worst case is the record expiring on its old schedule.
-  try {
-    await redis.expire(clientKey, CLIENT_REGISTRATION_TTL);
-  } catch (error) {
-    console.error(`[OAuth] Could not refresh registration TTL for ${client_id}:`, error);
-  }
+  // No TTL to refresh: the registration is not stored, so it cannot expire.
+  // The 30-day idle timeout this replaces is the bug that silently broke every
+  // client 30 days after it was installed.
 
   try {
     const oauthManager = getOAuthManager();

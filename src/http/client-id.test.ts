@@ -3,7 +3,9 @@ import {
   mintClientId,
   readClientId,
   isRegisteredRedirectUri,
+  isAcceptableRedirectUri,
   InvalidClientIdError,
+  InvalidRegistrationError,
 } from './client-id.js';
 
 const SECRET = 'test-signing-secret';
@@ -122,5 +124,116 @@ describe('a missing secret is never silently substituted', () => {
   it('exports no secret generator', async () => {
     const mod = await import('./client-id.js');
     expect(Object.keys(mod)).not.toContain('generateSigningSecret');
+  });
+});
+
+describe('minting refuses what reading would reject', () => {
+  // john-bot's review of the unwired module: mintClientId validated nothing
+  // while readClientId enforced a shape, so mint could issue an id that could
+  // never be read back. Harmless while nothing called mint; the moment
+  // /oauth/register passes req.body straight in, it stops being harmless.
+  it('rejects an empty or absent redirect_uris', () => {
+    for (const bad of [[], undefined, null, 'https://app.example/cb', {}]) {
+      expect(() =>
+        mintClientId({ redirect_uris: bad as unknown as string[] }, SECRET)
+      ).toThrow(InvalidRegistrationError);
+    }
+  });
+
+  it('caps how many redirect_uris a registration may carry', () => {
+    // The payload is the client id and the client id is in every authorize
+    // URL, so an unbounded registration is an unbounded URL — and the failure
+    // would land on the redirect, not here where it can be explained.
+    const many = Array.from({ length: 11 }, (_, i) => `https://app.example/cb${i}`);
+    expect(() => mintClientId({ redirect_uris: many }, SECRET)).toThrow(InvalidRegistrationError);
+    expect(() => mintClientId({ redirect_uris: many.slice(0, 10) }, SECRET)).not.toThrow();
+  });
+
+  it('caps client_name', () => {
+    expect(() =>
+      mintClientId({ redirect_uris: [CALLBACK], client_name: 'x'.repeat(257) }, SECRET)
+    ).toThrow(InvalidRegistrationError);
+  });
+
+  it('carries only the fields we mean to sign', () => {
+    // req.body reaches this function. A spread would put every extra key the
+    // caller sent into the id.
+    const id = mintClientId(
+      {
+        redirect_uris: [CALLBACK],
+        client_name: 'Claude Code',
+        junk: 'x'.repeat(4096),
+      } as unknown as { redirect_uris: string[]; client_name: string },
+      SECRET
+    );
+    expect(readClientId(id, SECRET)).toEqual({
+      redirect_uris: [CALLBACK],
+      client_name: 'Claude Code',
+      iat: expect.any(Number),
+    });
+    expect(id).not.toContain('junk');
+  });
+
+  it('round-trips a registration with no client_name', () => {
+    const id = mintClientId({ redirect_uris: [CALLBACK] }, SECRET);
+    const reg = readClientId(id, SECRET);
+    expect(reg.client_name).toBeUndefined();
+    expect(reg.redirect_uris).toEqual([CALLBACK]);
+  });
+});
+
+describe('isAcceptableRedirectUri', () => {
+  // /oauth/authorize redirects to whatever the registration names, so the mint
+  // boundary is the place to keep dangerous values out entirely.
+  it('accepts https anywhere', () => {
+    expect(isAcceptableRedirectUri('https://app.example/cb')).toBe(true);
+  });
+
+  it('accepts plaintext http only on loopback', () => {
+    expect(isAcceptableRedirectUri('http://127.0.0.1:8765/callback')).toBe(true);
+    expect(isAcceptableRedirectUri('http://localhost:8765/callback')).toBe(true);
+    // An authorization code over plaintext http to a remote host is the code
+    // read off the wire.
+    expect(isAcceptableRedirectUri('http://app.example/cb')).toBe(false);
+    expect(isAcceptableRedirectUri('http://127.0.0.1.attacker.test/cb')).toBe(false);
+  });
+
+  it('accepts the private-use schemes real clients actually send', () => {
+    // RFC 8252 §7.1 asks for a reversed-domain scheme; shipped MCP clients do
+    // not comply, and an allowlist would reject them. Rejecting a working
+    // client to enforce a SHOULD is the wrong trade here.
+    for (const uri of [
+      'cursor://anysphere.cursor-retrieval/oauth/callback',
+      'vscode://insforge.mcp/callback',
+      'com.example.app:/oauth2redirect',
+    ]) {
+      expect(isAcceptableRedirectUri(uri)).toBe(true);
+    }
+  });
+
+  it('rejects script-capable and opaque schemes', () => {
+    for (const uri of [
+      'javascript:alert(1)',
+      'JavaScript:alert(1)',
+      'data:text/html,<script>alert(1)</script>',
+      'vbscript:msgbox(1)',
+      'file:///etc/passwd',
+      'blob:https://app.example/uuid',
+    ]) {
+      expect(isAcceptableRedirectUri(uri)).toBe(false);
+    }
+  });
+
+  it('rejects relative and unparseable values', () => {
+    // A relative URI would resolve against our own origin at redirect time.
+    for (const uri of ['/callback', 'callback', '', '://nope', 'https://' + 'a'.repeat(3000)]) {
+      expect(isAcceptableRedirectUri(uri)).toBe(false);
+    }
+  });
+
+  it('rejects non-strings', () => {
+    for (const bad of [undefined, null, 42, ['https://app.example/cb'], {}]) {
+      expect(isAcceptableRedirectUri(bad)).toBe(false);
+    }
   });
 });

@@ -32,7 +32,108 @@ export interface ClientRegistration {
 
 export class InvalidClientIdError extends Error {}
 
+/**
+ * A registration we refuse to mint. Separate from InvalidClientIdError because
+ * the two mean different things to a caller: this one is the client's fault at
+ * registration time (RFC 7591 `invalid_client_metadata`, 400), the other is an
+ * id that does not verify at authorize time.
+ */
+export class InvalidRegistrationError extends Error {}
+
 const PREFIX = 'mcp_';
+
+/**
+ * Bounds on what a registration may contain.
+ *
+ * The payload IS the client id, and the client id travels in every authorize
+ * URL, so an unbounded registration is an unbounded URL. Browsers and proxies
+ * cut those off well before Node does, and the failure would land on the
+ * authorize redirect rather than on registration where it could be explained.
+ * These are far above what any real client sends.
+ */
+const MAX_REDIRECT_URIS = 10;
+const MAX_URI_LENGTH = 2048;
+const MAX_CLIENT_NAME_LENGTH = 256;
+
+/**
+ * Schemes we will not carry in a registration.
+ *
+ * The authorize endpoint redirects to whatever the registration names, so this
+ * is the one place to keep script-capable and opaque schemes out. Browsers
+ * already refuse to navigate to `javascript:` or `data:` in a Location header,
+ * so this is defence in depth rather than the only guard.
+ *
+ * Deliberately a denylist and not an allowlist. RFC 8252 §7.1 says a native
+ * client should use a reversed-domain private-use scheme (`com.example.app:`),
+ * and real MCP clients simply do not — `cursor://`, `vscode://` and friends are
+ * what actually arrives. An allowlist of https + loopback http + dotted schemes
+ * is the more principled rule and it would reject working clients today, which
+ * is the failure this whole module exists to stop happening silently.
+ */
+const FORBIDDEN_SCHEMES = new Set(['javascript:', 'data:', 'vbscript:', 'file:', 'blob:']);
+
+/**
+ * Is this a redirect_uri we are willing to sign?
+ *
+ * Absolute (a relative URI would resolve against our own origin), not
+ * script-capable, and plaintext http only for loopback — per RFC 8252 §8.3 a
+ * native client redirects to 127.0.0.1, but anything else on http would carry
+ * an authorization code in the clear.
+ */
+export function isAcceptableRedirectUri(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_URI_LENGTH) {
+    return false;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false; // not absolute, or not parseable at all
+  }
+
+  if (FORBIDDEN_SCHEMES.has(url.protocol)) {
+    return false;
+  }
+
+  if (url.protocol === 'http:') {
+    return url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+  }
+
+  return true;
+}
+
+/**
+ * Reject a registration we could sign but should not.
+ *
+ * `readClientId` already refuses a structurally wrong payload, so without this
+ * `mintClientId` would happily issue an id that can never be read back — the
+ * error surfacing at authorize time, in a browser, rather than at registration
+ * where the client is listening and the message can say what to fix.
+ */
+function assertMintable(registration: Omit<ClientRegistration, 'iat'>): void {
+  const { redirect_uris: uris, client_name: name } = registration;
+
+  if (!Array.isArray(uris) || uris.length === 0) {
+    throw new InvalidRegistrationError('redirect_uris is required and must be a non-empty array');
+  }
+  if (uris.length > MAX_REDIRECT_URIS) {
+    throw new InvalidRegistrationError(`redirect_uris must contain at most ${MAX_REDIRECT_URIS} entries`);
+  }
+  for (const uri of uris) {
+    if (!isAcceptableRedirectUri(uri)) {
+      throw new InvalidRegistrationError(
+        'each redirect_uri must be an absolute http(s) or application URI; ' +
+          'plaintext http is accepted only for loopback'
+      );
+    }
+  }
+  if (name !== undefined && (typeof name !== 'string' || name.length > MAX_CLIENT_NAME_LENGTH)) {
+    throw new InvalidRegistrationError(
+      `client_name must be a string of at most ${MAX_CLIENT_NAME_LENGTH} characters`
+    );
+  }
+}
 
 function sign(payload: string, secret: string): string {
   return createHmac('sha256', secret).update(payload).digest('base64url');
@@ -55,7 +156,15 @@ export function mintClientId(
   if (!secret) {
     throw new Error('a signing secret is required to mint client ids');
   }
-  const full: ClientRegistration = { ...registration, iat: now };
+  assertMintable(registration);
+  // Fields listed rather than spread. `registration` comes from a request body
+  // once this is wired, and a spread would carry every extra key the caller
+  // sent into the payload — which is the client id, which is the URL.
+  const full: ClientRegistration = {
+    redirect_uris: registration.redirect_uris,
+    ...(registration.client_name !== undefined ? { client_name: registration.client_name } : {}),
+    iat: now,
+  };
   const payload = Buffer.from(JSON.stringify(full)).toString('base64url');
   return `${PREFIX}${payload}.${sign(payload, secret)}`;
 }
