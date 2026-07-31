@@ -38,6 +38,13 @@ import {
   InvalidRegistrationError,
   type ClientRegistration,
 } from './client-id.js';
+import {
+  AUTH_STATE_COOKIE,
+  cookieAttributes,
+  readCookie,
+  isAcceptableClientState,
+  MAX_CLIENT_STATE_LENGTH,
+} from './auth-state-cookie.js';
 import { statusForHttpError } from './error-status.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
 
@@ -322,6 +329,16 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
   // Default scope if not provided (scope is optional per OAuth 2.0 spec)
   const resolvedScope = (scope as string) || OAUTH_CONFIG.supportedScopes.join(' ');
 
+  if (!isAcceptableClientState(state)) {
+    // The client's own `state` rides inside our sealed cookie, so an unbounded
+    // one is an unbounded cookie. Rejected here, where the client is listening,
+    // rather than at the callback where only a browser would see it.
+    return res.status(400).json({
+      error: 'invalid_request',
+      error_description: `state must be at most ${MAX_CLIENT_STATE_LENGTH} characters`,
+    });
+  }
+
   if (response_type !== 'code') {
     return res.status(400).json({
       error: 'unsupported_response_type',
@@ -390,8 +407,7 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
   try {
     const oauthManager = getOAuthManager();
 
-    const { stateId, insforgeCodeChallenge } = await oauthManager.createAuthorizationState({
-      clientId: client_id as string,
+    const { handle, sealedState, insforgeCodeChallenge } = await oauthManager.createAuthorizationState({
       redirectUri: redirect_uri as string,
       scope: resolvedScope,
       state: state as string | undefined,
@@ -404,7 +420,10 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
     authUrl.searchParams.set('redirect_uri', OAUTH_CONFIG.callbackUrl);
     authUrl.searchParams.set('response_type', 'code');
     authUrl.searchParams.set('scope', INSFORGE_CONFIG.oauthScopes);
-    authUrl.searchParams.set('state', stateId);
+    // The handle, not the record. The platform stores `state` in a 255-char
+    // column; the record itself rides in a cookie on our own origin.
+    res.cookie(AUTH_STATE_COOKIE, sealedState, cookieAttributes(SERVER_CONFIG.publicUrl));
+    authUrl.searchParams.set('state', handle);
     authUrl.searchParams.set('code_challenge', insforgeCodeChallenge);
     authUrl.searchParams.set('code_challenge_method', 'S256');
 
@@ -435,7 +454,9 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
       errorDescription: (error_description as string) || (error as string) || 'Unknown Insforge error',
       endpoint: '/oauth/callback',
     });
-    const authState = state ? await oauthManager.getAuthorizationState(state as string) : null;
+    const sealed = readCookie(req.headers.cookie, AUTH_STATE_COOKIE);
+    const authState =
+      sealed && state ? await oauthManager.getAuthorizationState(sealed, state as string) : null;
 
     if (authState?.redirectUri) {
       const redirectUrl = new URL(authState.redirectUri);
@@ -465,7 +486,12 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
   }
 
   try {
-    const authState = await oauthManager.getAuthorizationState(state as string);
+    // The record is in our cookie; the platform only echoes the handle. Both
+    // are required, and they have to name the same authorization.
+    const sealed = readCookie(req.headers.cookie, AUTH_STATE_COOKIE);
+    const authState = sealed
+      ? await oauthManager.getAuthorizationState(sealed, state as string)
+      : null;
     if (!authState) {
       getAnalyticsService().trackOAuthFailure({
         errorType: 'invalid_request',
@@ -521,8 +547,11 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
     // more field is a different string.
     const stateWithToken = oauthManager.attachPlatformToken(authState, tokens.access_token);
 
+    // Same shape as authorize: the record replaces the cookie, the URL carries
+    // only the handle. The handle is unchanged, so the two halves still match.
+    res.cookie(AUTH_STATE_COOKIE, stateWithToken, cookieAttributes(SERVER_CONFIG.publicUrl));
     res.redirect(
-      `${SERVER_CONFIG.publicUrl}${OAUTH_ENDPOINTS.selectProject}?state_id=${encodeURIComponent(stateWithToken)}`
+      `${SERVER_CONFIG.publicUrl}${OAUTH_ENDPOINTS.selectProject}?state_id=${encodeURIComponent(authState.handle)}`
     );
   } catch (error) {
     console.error('OAuth callback error:', error);
@@ -551,7 +580,10 @@ app.get(OAUTH_ENDPOINTS.selectProject, async (req: Request, res: Response) => {
   try {
     const oauthManager = getOAuthManager();
 
-    const authState = await oauthManager.getAuthorizationState(state_id as string);
+    const sealed = readCookie(req.headers.cookie, AUTH_STATE_COOKIE);
+    const authState = sealed
+      ? await oauthManager.getAuthorizationState(sealed, state_id as string)
+      : null;
     if (!authState) {
       return res.status(400).send('Session expired. Please start the authorization process again.');
     }
@@ -591,8 +623,11 @@ app.post(OAUTH_ENDPOINTS.selectProject, async (req: Request, res: Response) => {
   try {
     const oauthManager = getOAuthManager();
 
-    const authState = await oauthManager.getAuthorizationState(state_id as string);
-    if (!authState?.platformAccessToken) {
+    const sealed = readCookie(req.headers.cookie, AUTH_STATE_COOKIE);
+    const authState = sealed
+      ? await oauthManager.getAuthorizationState(sealed, state_id as string)
+      : null;
+    if (!sealed || !authState?.platformAccessToken) {
       return res.status(400).json({
         error: 'invalid_request',
         error_description: 'Invalid or expired state',
@@ -601,7 +636,7 @@ app.post(OAUTH_ENDPOINTS.selectProject, async (req: Request, res: Response) => {
     const token = authState.platformAccessToken;
 
     const code = await oauthManager.createAuthorizationCode(
-      state_id as string,
+      sealed,
       token,
       project_id as string
     );
