@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import { randomUUID, createHash } from 'crypto';
+import v8 from 'node:v8';
 
 // Transport imports
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -16,6 +17,8 @@ import {
   OAUTH_CONFIG,
   STREAMABLE_HTTP_ENDPOINTS,
   SSE_ENDPOINTS,
+  SSE_KEEPALIVE_MS,
+  SESSION_SWEEP_MS,
   OAUTH_ENDPOINTS,
   API_ENDPOINTS,
   isOAuthConfigured,
@@ -149,6 +152,25 @@ function extractLegacyHeaders(req: Request): { apiKey?: string; apiBaseUrl?: str
   };
 }
 
+/**
+ * Heap numbers for the health payload.
+ *
+ * The session leak had to be diagnosed by counting objects and multiplying by
+ * a separately-measured size, because the process publishes no memory metric
+ * at all — so "how long until it dies" could only ever be an estimate. V8's
+ * own limit is the number that actually decides that, and exposing it costs
+ * nothing.
+ */
+function heapStats() {
+  const { heap_size_limit, used_heap_size } = v8.getHeapStatistics();
+  return {
+    heapUsedMb: Math.round(used_heap_size / 1024 / 1024),
+    heapLimitMb: Math.round(heap_size_limit / 1024 / 1024),
+    heapUsedPct: Math.round((used_heap_size / heap_size_limit) * 100),
+    rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+  };
+}
+
 // ============================================================================
 // Health & Discovery Endpoints
 // ============================================================================
@@ -166,6 +188,7 @@ app.get(API_ENDPOINTS.health, async (_req: Request, res: Response) => {
       sse: '2024-11-05 (deprecated)',
     },
     sessions: stats,
+    memory: heapStats(),
     authentication: 'OAuth Bearer Token',
   });
 });
@@ -943,6 +966,13 @@ app.get(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
     });
   }
 
+  // This stream is the only sign of life for a client that opens it and then
+  // sends nothing. Hold the session for as long as it is open, and restart the
+  // Redis record's clock now so a restart can still restore the session.
+  sessionManager.openStream(sessionId);
+  res.on('close', () => sessionManager.closeStream(sessionId));
+  await sessionManager.touchSession(sessionId);
+
   await runtime.transport.handleRequest(req, res, req.body);
 });
 
@@ -1045,9 +1075,24 @@ app.get(SSE_ENDPOINTS.sse, async (req: Request, res: Response) => {
 
   console.log(`[SSE] Session created: ${transport.sessionId}, Project: ${validProjectInfo.projectName}`);
 
+  // An idle SSE stream carries no bytes, so the load balancer closes it on its
+  // idle timeout and the client sees the connection drop. A comment frame is
+  // ignored by the event-stream parser and by the transport's own framing, so
+  // it keeps the connection warm without being visible to the client.
+  const keepAlive = setInterval(() => {
+    if (res.writableEnded) return;
+    try {
+      res.write(': keepalive\n\n');
+    } catch (error) {
+      console.error(`[SSE] Keepalive write failed for ${transport.sessionId}:`, error);
+    }
+  }, SSE_KEEPALIVE_MS);
+  keepAlive.unref();
+
   // Clean up on close
   res.on('close', () => {
     console.log(`[SSE] Session closed: ${transport.sessionId}`);
+    clearInterval(keepAlive);
     sseTransports.delete(transport.sessionId);
 
     // Clean up the session from SessionManager (async with error handling)
@@ -1133,6 +1178,16 @@ app.post(SSE_ENDPOINTS.messages, async (req: Request, res: Response) => {
     });
   }
 
+  // Streamable HTTP refreshes the Redis record on every request; the SSE path
+  // did not, so an SSE record lapsed 24h after creation however active the
+  // client was, and /health under-reported live SSE sessions. Fire-and-forget:
+  // a failed refresh must not fail the message.
+  getSessionManager()
+    .touchSession(sessionId)
+    .catch((error) => {
+      console.error(`[SSE] Failed to refresh session ${tokenFingerprint(sessionId)}`, error);
+    });
+
   await transport.handlePostMessage(req, res, req.body);
 });
 
@@ -1149,6 +1204,10 @@ async function startServer() {
     const redis = getRedisClient();
     await redis.ping();
     console.log('[Redis] Connection verified');
+
+    // Runtime sessions are only dropped on an explicit DELETE, which Streamable
+    // HTTP clients rarely send. Reap the ones Redis has already expired.
+    getSessionManager().startIdleSweep(SESSION_SWEEP_MS);
 
     const server = app.listen(SERVER_CONFIG.port, SERVER_CONFIG.host, () => {
       const redisConfig = getRedisConfig();
@@ -1233,6 +1292,7 @@ async function startServer() {
         // Close all MCP sessions
         try {
           const sessionManager = getSessionManager();
+          sessionManager.stopIdleSweep();
           await sessionManager.closeAllSessions();
         } catch (error) {
           console.error('[Shutdown] Error closing sessions:', error);

@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { getRedisClient } from './redis.js';
+import { SESSION_SWEEP_MS } from './config.js';
 import { registerInsforgeTools } from '../shared/tools/index.js';
 import { sdkToolHost } from '../shared/tools/host.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
@@ -38,6 +39,14 @@ interface RuntimeSession {
   server: McpServer;
   transport: StreamableHTTPServerTransport | SSEServerTransport;
   transportType: 'streamable' | 'sse';
+  // Last time this process saw real client traffic for the session, on the
+  // monotonic clock. Tracked in memory because it is the only record of
+  // activity that survives Redis losing its data — see selectOrphanedSessions.
+  lastSeenAt: number;
+  // Server->client streams currently open for this session (GET /mcp). A stream
+  // is activity that leaves no other trace: it produces no requests to stamp
+  // lastSeenAt and nothing that refreshes the Redis record.
+  openStreams: number;
 }
 
 // Redis key prefix
@@ -45,6 +54,96 @@ const SESSION_KEY_PREFIX = 'mcp:session:';
 
 // Session TTL in seconds (24 hours)
 const SESSION_TTL = 24 * 60 * 60;
+
+// Session TTL in milliseconds, for comparison against in-memory timestamps.
+export const SESSION_TTL_MS = SESSION_TTL * 1000;
+
+/**
+ * Clock for in-memory session ages.
+ *
+ * Deliberately monotonic rather than Date.now(). These timestamps are only
+ * ever compared against each other to measure elapsed time, never against
+ * anything Redis stores, so wall-clock accuracy buys nothing — while a
+ * forward clock step (NTP correction, a VM resuming from suspend) would age
+ * every live session past its TTL at once and hand the sweep the exact
+ * conclusion this gate exists to prevent. CLOCK_MONOTONIC can only lag real
+ * elapsed time, which errs toward holding a session too long.
+ */
+export function monotonicNow(): number {
+  return performance.now();
+}
+
+/** The sweep's view of one runtime session. */
+export interface SweepCandidate {
+  sessionId: string;
+  lastSeenAt: number;
+  openStreams: number;
+}
+
+/**
+ * Pick the runtime sessions that no longer have a Redis record.
+ *
+ * Redis owns session lifetime — the record expires on SESSION_TTL — but the
+ * in-memory McpServer and transport are only dropped on an explicit DELETE.
+ * Streamable HTTP clients mostly never send one, so anything whose record has
+ * gone is an orphan holding a server, a transport and a full tool registry.
+ *
+ * `exists` is the pipelined EXISTS reply for the matching id. A missing or
+ * failed reply counts as alive: a transient Redis error must never be read as
+ * "reap this live session".
+ *
+ * A missing record is necessary but not sufficient. Redis can also come back
+ * empty — a restart without persistence, a failover to a cold replica, an
+ * eviction — and then every resident session reads as an orphan at once, so
+ * the sweep would close connections that are actively serving traffic.
+ * touchSession cannot repair that: it only rewrites a record it can still
+ * read, so a wiped record stays wiped no matter how busy the client is.
+ *
+ * The in-memory clock settles it. A record only expires SESSION_TTL after the
+ * last touch, and that same touch stamps lastSeenAt, so the two cross at the
+ * same instant during normal operation and this gate costs no reap latency.
+ * They diverge in exactly one case: Redis lost a record early. Then the
+ * session we saw traffic on minutes ago is held, and one genuinely abandoned
+ * is still collected on schedule.
+ *
+ * An open server->client stream counts as alive on its own. It is the one form
+ * of activity that stamps neither clock — the client holds GET /mcp open and
+ * may send no requests at all, so the record ages out and lastSeenAt stays
+ * frozen at the moment the stream opened. Both clocks then agree to reap a
+ * client that is plainly still connected.
+ */
+export function selectOrphanedSessions(
+  sessions: SweepCandidate[],
+  exists: number[],
+  now: number = monotonicNow()
+): string[] {
+  return sessions
+    .filter(
+      (session, i) =>
+        exists[i] === 0 &&
+        session.openStreams === 0 &&
+        now - session.lastSeenAt >= SESSION_TTL_MS
+    )
+    .map((session) => session.sessionId);
+}
+
+/**
+ * Sessions whose Redis record vanished while they were still inside their TTL.
+ *
+ * That combination is evidence of Redis losing data rather than expiring it,
+ * and it is the only thing worth waking an operator for — the records are not
+ * coming back on their own. A session held only because a stream is open is
+ * NOT evidence of anything: its record expired on schedule, which is normal.
+ */
+export function selectPrematurelyMissing(
+  sessions: SweepCandidate[],
+  exists: number[],
+  now: number = monotonicNow()
+): string[] {
+  return sessions
+    .filter((session, i) => exists[i] === 0 && now - session.lastSeenAt < SESSION_TTL_MS)
+    .map((session) => session.sessionId);
+}
 
 /**
  * SessionManager handles MCP session lifecycle with Redis persistence
@@ -56,6 +155,9 @@ const SESSION_TTL = 24 * 60 * 60;
 export class SessionManager {
   // In-memory cache for runtime instances
   private runtimeSessions = new Map<string, RuntimeSession>();
+
+  // Periodic reaper for runtime sessions Redis has already expired
+  private sweepTimer?: NodeJS.Timeout;
 
   /**
    * Create a new session
@@ -105,7 +207,7 @@ export class SessionManager {
     );
 
     // Store runtime instances in memory
-    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'streamable' });
+    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'streamable', lastSeenAt: monotonicNow(), openStreams: 0 });
 
     console.log(`[SessionManager] Session created: ${sessionId}`);
     return server;
@@ -207,7 +309,7 @@ export class SessionManager {
     await server.connect(transport);
 
     // Store runtime instances in memory
-    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'streamable' });
+    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'streamable', lastSeenAt: monotonicNow(), openStreams: 0 });
 
     // Update last accessed time
     await this.touchSession(sessionId);
@@ -265,7 +367,7 @@ export class SessionManager {
     );
 
     // Store runtime instances in memory
-    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'sse' });
+    this.runtimeSessions.set(sessionId, { server, transport, transportType: 'sse', lastSeenAt: monotonicNow(), openStreams: 0 });
 
     console.log(`[SessionManager] SSE session created: ${sessionId}`);
     return server;
@@ -274,8 +376,49 @@ export class SessionManager {
   /**
    * Update last accessed time and refresh TTL
    */
+  /**
+   * Register a server->client stream as open, and stamp the session.
+   *
+   * Deliberately a count rather than a flag: a client may reconnect its stream
+   * before the old response has finished closing, and a flag cleared by the
+   * departing one would leave a live stream unprotected.
+   */
+  openStream(sessionId: string): void {
+    const runtime = this.runtimeSessions.get(sessionId);
+    if (!runtime) return;
+    runtime.openStreams += 1;
+    runtime.lastSeenAt = monotonicNow();
+  }
+
+  /**
+   * Release a stream. Safe to call for a session that has already been deleted,
+   * which happens whenever a close event lands after a reap or a DELETE.
+   */
+  closeStream(sessionId: string): void {
+    const runtime = this.runtimeSessions.get(sessionId);
+    if (!runtime) return;
+    runtime.openStreams = Math.max(0, runtime.openStreams - 1);
+    // The stream was alive right up to this moment; start the idle clock here
+    // rather than from whenever it opened.
+    runtime.lastSeenAt = monotonicNow();
+  }
+
+  /** Open stream count, for tests and diagnostics. */
+  getOpenStreamCount(sessionId: string): number {
+    return this.runtimeSessions.get(sessionId)?.openStreams ?? 0;
+  }
+
   async touchSession(sessionId: string): Promise<void> {
     const redis = getRedisClient();
+
+    // Stamp memory first and unconditionally. The Redis write below is a
+    // no-op when the record is already gone, so this is the only evidence of
+    // activity that outlives Redis losing its data.
+    const runtime = this.runtimeSessions.get(sessionId);
+    if (runtime) {
+      runtime.lastSeenAt = monotonicNow();
+    }
+
     const sessionData = await this.getSessionData(sessionId);
 
     if (sessionData) {
@@ -310,6 +453,112 @@ export class SessionManager {
     await redis.del(SESSION_KEY_PREFIX + sessionId);
 
     console.log(`[SessionManager] Session deleted: ${sessionId}`);
+  }
+
+  /**
+   * Drop runtime sessions whose Redis record has gone, closing each one.
+   * Returns how many were reaped.
+   */
+  async sweepOrphanedSessions(): Promise<number> {
+    // Streamable HTTP only. SSE has a real disconnect signal and cleans itself
+    // up on res 'close' — that asymmetry is the whole reason this reaper exists.
+    // Sweeping SSE too would close live connections: nothing on the SSE message
+    // path refreshes the record, so it lapses at SESSION_TTL from creation
+    // whether or not the client is active, and the keepalive means such a
+    // connection is still open when it does.
+    const candidates: SweepCandidate[] = Array.from(this.runtimeSessions.entries())
+      .filter(([, session]) => session.transportType === 'streamable')
+      .map(([sessionId, session]) => ({
+        sessionId,
+        lastSeenAt: session.lastSeenAt,
+        openStreams: session.openStreams,
+      }));
+    if (candidates.length === 0) {
+      return 0;
+    }
+
+    const redis = getRedisClient();
+    const pipeline = redis.pipeline();
+    for (const { sessionId } of candidates) {
+      pipeline.exists(SESSION_KEY_PREFIX + sessionId);
+    }
+    const replies = await pipeline.exec();
+
+    // A failed or absent reply is treated as "still alive" so a Redis blip
+    // can't take out live sessions.
+    const exists = candidates.map((_, i) => {
+      const reply = replies?.[i];
+      if (!reply || reply[0]) return 1;
+      const value = reply[1];
+      // EXISTS answers with an integer. Anything else — null in particular —
+      // is not a statement that the key is absent, and Number(null) is 0, so a
+      // bare cast turns an indeterminate reply into "reap this". Alive unless
+      // Redis actually said zero.
+      if (typeof value !== 'number' && typeof value !== 'string') return 1;
+      const count = Number(value);
+      return Number.isInteger(count) ? count : 1;
+    });
+
+    const selected = selectOrphanedSessions(candidates, exists);
+
+    // Re-check each one against the live entry immediately before closing it.
+    // The candidate list is a snapshot taken before the EXISTS round trip, and
+    // a request can arrive in that window: touchSession stamps lastSeenAt and
+    // rewrites the record, so acting on the snapshot would close a session that
+    // just proved it is alive.
+    const orphaned: string[] = [];
+    for (const sessionId of selected) {
+      const current = this.runtimeSessions.get(sessionId);
+      if (!current) continue;
+      if (current.openStreams > 0 || monotonicNow() - current.lastSeenAt < SESSION_TTL_MS) {
+        continue;
+      }
+      await this.deleteSession(sessionId);
+      orphaned.push(sessionId);
+    }
+
+    // Records gone while the session is still inside its TTL means Redis lost
+    // data rather than expired it. Worth a line in the log: these sessions
+    // survive the sweep but their records will not come back on their own.
+    const heldBack = selectPrematurelyMissing(candidates, exists).length;
+    if (heldBack > 0) {
+      console.warn(
+        `[SessionManager] ${heldBack} session(s) lost their Redis record before TTL — holding them; check Redis for a restart, failover or eviction`
+      );
+    }
+
+    if (orphaned.length > 0) {
+      console.log(
+        `[SessionManager] Swept ${orphaned.length} orphaned session(s); ${this.runtimeSessions.size} remain in memory`
+      );
+    }
+    return orphaned.length;
+  }
+
+  /**
+   * Start the periodic sweep. Idempotent; the timer is unref'd so it never
+   * holds the process open on shutdown.
+   */
+  startIdleSweep(intervalMs: number = SESSION_SWEEP_MS): void {
+    if (this.sweepTimer) {
+      return;
+    }
+    this.sweepTimer = setInterval(() => {
+      this.sweepOrphanedSessions().catch((error) => {
+        console.error('[SessionManager] Sweep failed:', error);
+      });
+    }, intervalMs);
+    this.sweepTimer.unref();
+  }
+
+  /**
+   * Stop the periodic sweep.
+   */
+  stopIdleSweep(): void {
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = undefined;
+    }
   }
 
   /**
