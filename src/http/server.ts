@@ -27,9 +27,9 @@ import {
   clientIdSigningKey,
 } from './config.js';
 import { renderProjectSelectionPage } from './templates/project-selection.js';
-import { renderOAuthErrorPage } from './templates/oauth-error.js';
 import { getAnalyticsService, extractClientInfo } from './analytics.js';
 import { sendUnauthorized, protectedResourceMetadata } from './auth-challenge.js';
+import { sendOAuthError } from './oauth-error-response.js';
 import {
   mintClientId,
   readClientId,
@@ -92,17 +92,6 @@ function isInitializeRequest(body: unknown): boolean {
   }
 
   return false;
-}
-
-/**
- * Whether this request is a browser navigation rather than a program's fetch.
- *
- * The authorize endpoint is reached by opening a URL in the user's browser —
- * the MCP client never reads the response itself — so an error here has to be
- * written for a person. Everything else still gets the OAuth JSON body.
- */
-function prefersHtml(req: Request): boolean {
-  return req.accepts(['json', 'html']) === 'html';
 }
 
 /**
@@ -275,7 +264,7 @@ app.post(OAUTH_ENDPOINTS.register, (req: Request, res: Response) => {
     }
     // A missing signing key is our misconfiguration, not the client's.
     console.error('[OAuth] Could not mint a client id:', error);
-    return res.status(500).json({
+    return sendOAuthError(req, res, 500, {
       error: 'server_error',
       error_description: 'Client registration is not available on this server.',
     });
@@ -306,24 +295,39 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
   const { client_id, redirect_uri, response_type, scope, state, code_challenge, code_challenge_method } = req.query;
 
   if (!isOAuthConfigured()) {
-    return res.status(500).json({
+    return sendOAuthError(req, res, 500, {
       error: 'server_error',
       error_description: 'OAuth client credentials not configured. Set INSFORGE_CLIENT_ID and INSFORGE_CLIENT_SECRET.',
     });
   }
 
   if (!client_id || !redirect_uri || !response_type) {
-    return res.status(400).json({
-      error: 'invalid_request',
-      error_description: 'Missing required parameters: client_id, redirect_uri, response_type',
-    });
+    return sendOAuthError(
+      req,
+      res,
+      400,
+      {
+        error: 'invalid_request',
+        error_description: 'Missing required parameters: client_id, redirect_uri, response_type',
+      },
+      {
+        // Distinct from the redirect_uri wording: reaching authorize with no
+        // parameters at all is usually a person opening the URL by hand, and
+        // telling them to reinstall would be wrong.
+        heading: 'There is nothing to sign in to here',
+        message:
+          'This page is the middle of a sign-in that a tool starts for you. Opening it ' +
+          'directly does nothing. Start the connection from your editor or client instead.',
+        action: undefined,
+      }
+    );
   }
 
   // Default scope if not provided (scope is optional per OAuth 2.0 spec)
   const resolvedScope = (scope as string) || OAUTH_CONFIG.supportedScopes.join(' ');
 
   if (response_type !== 'code') {
-    return res.status(400).json({
+    return sendOAuthError(req, res, 400, {
       error: 'unsupported_response_type',
       error_description: 'Only response_type=code is supported',
     });
@@ -354,19 +358,7 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
     // its id names a Redis row that is no longer read. The page below is the
     // correct answer for them too — re-register and it works.
     console.log('[OAuth] Client id at authorize did not verify');
-    if (prefersHtml(req)) {
-      return res.status(400).type('html').send(
-        renderOAuthErrorPage({
-          heading: 'This connection needs to be set up again',
-          message:
-            'The app you are connecting from is not registered with this server any more. ' +
-            'Nothing is wrong with your account and no data was lost — remove the InsForge MCP ' +
-            'server from your client and add it back, and this will complete normally.',
-          action: 'npx @insforge/install',
-        })
-      );
-    }
-    return res.status(400).json({
+    return sendOAuthError(req, res, 400, {
       error: 'invalid_client',
       error_description: 'Unknown client_id. Register client first via /oauth/register.',
     });
@@ -377,7 +369,9 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
   // authorization-code theft: the code would be delivered to whatever URI the
   // request named.
   if (!isRegisteredRedirectUri(registration, redirect_uri)) {
-    return res.status(400).json({
+    // The branch a real user is most likely to reach, and until now the one
+    // that told them least: raw JSON in a browser tab.
+    return sendOAuthError(req, res, 400, {
       error: 'invalid_request',
       error_description: 'redirect_uri does not match any registered redirect URIs for this client.',
     });
@@ -411,8 +405,12 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
     console.log(`[OAuth] Redirecting to Insforge OAuth: ${authUrl.toString()}`);
     res.redirect(authUrl.toString());
   } catch (error) {
+    // john-bot's Critical on this PR, and it is the tenth consumer in a change
+    // whose whole point was not stopping at the ones I noticed. The entire GET
+    // is a browser navigation, so a throw anywhere inside it — a platform
+    // outage, a missing signing key — put raw JSON in the person's tab.
     console.error('OAuth authorize error:', error);
-    res.status(statusForHttpError(error)).json({
+    sendOAuthError(req, res, statusForHttpError(error), {
       error: 'server_error',
       error_description: 'Failed to initiate authorization',
     });
@@ -449,7 +447,13 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
       return res.redirect(redirectUrl.toString());
     }
 
-    return res.status(400).json({ error, error_description });
+    // No registered redirect to bounce the error back to, so this ends in the
+    // user's tab. The callback is ALWAYS a browser navigation — it is the
+    // platform redirecting them here — so JSON was never right on any branch.
+    return sendOAuthError(req, res, 400, {
+      error: error as string,
+      error_description: error_description as string | undefined,
+    });
   }
 
   if (!code || !state) {
@@ -458,10 +462,19 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
       errorDescription: 'Missing required parameters: code, state',
       endpoint: '/oauth/callback',
     });
-    return res.status(400).json({
-      error: 'invalid_request',
-      error_description: 'Missing required parameters: code, state',
-    });
+    return sendOAuthError(
+      req,
+      res,
+      400,
+      { error: 'invalid_request', error_description: 'Missing required parameters: code, state' },
+      {
+        heading: 'This sign-in did not come back complete',
+        message:
+          'The sign-in was interrupted before it finished. Starting it again from your ' +
+          'editor or client is all that is needed.',
+        action: undefined,
+      }
+    );
   }
 
   try {
@@ -472,10 +485,19 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
         errorDescription: 'Invalid or expired state',
         endpoint: '/oauth/callback',
       });
-      return res.status(400).json({
-        error: 'invalid_request',
-        error_description: 'Invalid or expired state',
-      });
+      return sendOAuthError(
+        req,
+        res,
+        400,
+        { error: 'invalid_request', error_description: 'Invalid or expired state' },
+        {
+          heading: 'This sign-in took too long',
+          message:
+            'Sign-ins expire after a few minutes, and this one has. Start it again from ' +
+            'your editor or client — nothing is wrong with your account.',
+          action: undefined,
+        }
+      );
     }
 
     console.log('[OAuth] Exchanging code for tokens...');
@@ -508,10 +530,22 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
         errorDescription: 'Token exchange failed',
         endpoint: '/oauth/callback',
       });
-      return res.status(400).json({
-        error: 'token_exchange_failed',
-        error_description: tokens.error_description || tokens.error || 'No access token returned',
-      });
+      return sendOAuthError(
+        req,
+        res,
+        400,
+        {
+          error: 'token_exchange_failed',
+          error_description: tokens.error_description || tokens.error || 'No access token returned',
+        },
+        {
+          heading: 'Sign-in could not be completed',
+          message:
+            'The InsForge platform did not return a token for this sign-in. Trying again ' +
+            'usually works; if it does not, the details below are what support will ask for.',
+          action: undefined,
+        }
+      );
     }
 
     console.log('[OAuth] Token received, redirecting to project selection...');
@@ -531,7 +565,12 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
       errorDescription: 'Failed to process callback',
       endpoint: '/oauth/callback',
     });
-    res.status(statusForHttpError(error)).json({
+    // The EIGHTH browser-reachable branch, and the third time on this PR that
+    // I converted the ones I could see and missed one. The callback is a
+    // browser navigation end to end, so its outer catch is as visible as any
+    // branch inside it. Counting is not the method; routing everything through
+    // one helper is, and this is the last place that was not.
+    sendOAuthError(req, res, statusForHttpError(error), {
       error: 'server_error',
       error_description: error instanceof Error ? error.message : 'Failed to process callback',
     });
