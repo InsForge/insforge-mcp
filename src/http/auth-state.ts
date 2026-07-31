@@ -59,9 +59,29 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
  *                                                   code challenge
  *
  * So `state` has to go back to being a short handle with the payload carried
- * somewhere else — a cookie on our own origin is the option that keeps this
- * module and drops nothing. Do not spend an afternoon trimming fields; 410 is
- * the floor and the column is 255.
+ * somewhere else. Do not spend an afternoon trimming fields: 410 is the floor
+ * and the column is 255.
+ *
+ * A COOKIE IS NOT SUFFICIENT ON ITS OWN EITHER, and I wrote that it was before
+ * Cody caught it — the same whole-payload mistake as the one above, one
+ * paragraph later. A cookie moves the bound to roughly 4096 bytes; it does not
+ * remove it. Measured the way a browser counts it, percent-encoded value plus
+ * attributes:
+ *
+ *   client_id at its 4096 cap, client state 512   6639   OVER
+ *   no client_id, client state bounded to 512     1159   fits
+ *   realistic (loopback, 43-char state)            544   ample
+ *
+ * Neither half is sufficient alone: bounding the fields still busts the
+ * platform's 255-char column, and the cookie still busts ~4096 while the
+ * client_id rides inside the seal. Together they fit with margin — drop the
+ * client_id from the seal (the authorize handler already has it from the query)
+ * and reject an over-long client `state` with invalid_request, so every
+ * component is BOUNDED rather than hoped about.
+ *
+ * Absolute numbers differ slightly from the ones in the cutover doc because we
+ * counted the envelope differently; the conclusion is the same either way,
+ * which is the part worth trusting.
  */
 
 export class InvalidAuthStateError extends Error {}
