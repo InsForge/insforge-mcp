@@ -147,7 +147,32 @@ async function resolveProjectFromToken(token: string): Promise<{
   oauthTokenHash: string;
 } | null> {
   const oauthManager = getOAuthManager();
-  return oauthManager.resolveProjectFromToken(token);
+  try {
+    return await oauthManager.resolveProjectFromToken(token);
+  } catch (error) {
+    // NOTHING here may escape, and that is the whole point of this wrapper.
+    //
+    // Measured on the live slug: a stale bearer — one issued before today's
+    // token format changed — reached Redis, threw MaxRetriesPerRequestError,
+    // and Express answered with a 500 and a raw stack. No WWW-Authenticate.
+    //
+    // "Not a 500" is not the same as "a 401". The challenge header is the ONLY
+    // thing that tells an MCP client to re-run OAuth; a 500 reads as "the
+    // server is broken, give up", so a client holding an old token never
+    // recovers on its own. Iris found this, and it is not hypothetical: the
+    // token format changed three times today and every client holding an
+    // earlier one lands here, as will every existing user at the cutover.
+    //
+    // The honest cost, stated rather than hidden: a genuine infrastructure
+    // fault is now also reported as an authorization failure, which
+    // mislabels it. That is the right trade only because the client's
+    // available action is identical either way — re-authorize — and because a
+    // silent 500 gives it no action at all. The fault is logged at error level
+    // so it stays visible to us even though the client is told something
+    // softer.
+    console.error('[OAuth] Could not resolve a token; answering with a challenge:', error);
+    return null;
+  }
 }
 
 /**
@@ -365,6 +390,29 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
     return res.status(400).json({
       error: 'invalid_request',
       error_description: `state must be at most ${MAX_CLIENT_STATE_LENGTH} characters`,
+    });
+  }
+
+  if (!code_challenge) {
+    // Refused HERE, not at the end.
+    //
+    // #91 made authorization codes stateless, which means they cannot be
+    // single-use, which means PKCE is what stops a replay. I put the refusal in
+    // createAuthorizationCode — and measured on the slug that a client without
+    // PKCE still gets a 302, signs in through the browser, picks a project, and
+    // only THEN fails. The person did all the work before we told them we were
+    // never going to accept it.
+    //
+    // That is the same mistake as validating a redirect_uri at authorize
+    // instead of at registration: reject where the caller is listening, not
+    // where only a browser can see it. The MCP client reads this response; it
+    // never reads the one at the end of the flow.
+    return sendOAuthError(req, res, 400, {
+      error: 'invalid_request',
+      error_description:
+        'code_challenge is required. This server advertises S256 as its only ' +
+        'code_challenge_method and issues authorization codes that carry their own state, ' +
+        'so PKCE is what makes a code safe to accept.',
     });
   }
 
