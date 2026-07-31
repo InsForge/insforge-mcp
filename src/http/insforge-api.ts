@@ -69,10 +69,47 @@ export class InsforgeApiError extends Error {
 }
 
 /**
+ * How long we wait for the platform before calling it unreachable.
+ *
+ * Every call in this file had NO timeout, and that quietly made the 503 path
+ * unreachable in the case it was written for. Measured against a socket that
+ * accepts the connection and never answers — the shape an overloaded service
+ * actually takes:
+ *
+ *   no timeout   still hanging at 30s   (undici's default headersTimeout is 300s)
+ *
+ * Cloudflare gives up at 100s and the MCP client long before that, so a stalled
+ * platform produced a gateway timeout — never our "temporarily_unavailable"
+ * with a Retry-After. The distinction between "refused" and "could not tell"
+ * only exists if we find out promptly which one it is.
+ *
+ * So a failure has to be FAST as well as classified. 10s matches the one place
+ * that already had a bound (the backend version check in the tool registrar) and
+ * is comfortably inside every proxy in the chain. Note this is on the request
+ * path for a cache miss, so it is also the worst case a user waits before being
+ * told to retry.
+ *
+ * AbortSignal.timeout throws a TimeoutError, which is not an InsforgeApiError —
+ * so isAuthorizationRefusal() reads it as "could not tell" and it becomes a 503.
+ * That is the intended route, and it is why this needs no special-casing
+ * downstream.
+ */
+const PLATFORM_TIMEOUT_MS = 10_000;
+
+/**
+ * Every outbound call to the platform goes through this, so a new one cannot be
+ * added without a bound. That is the actual defect being fixed: not a missing
+ * timeout in one place, but six places each free to forget.
+ */
+function platformFetch(url: string, init: Parameters<typeof fetch>[1] = {}) {
+  return fetch(url, { ...init, signal: AbortSignal.timeout(PLATFORM_TIMEOUT_MS) });
+}
+
+/**
  * Validate OAuth token and get user profile
  */
 export async function validateToken(token: string): Promise<UserProfile> {
-  const response = await fetch(`${INSFORGE_API_BASE}/auth/v1/profile`, {
+  const response = await platformFetch(`${INSFORGE_API_BASE}/auth/v1/profile`, {
     method: 'GET',
     headers: {
       'Authorization': `Bearer ${token}`,
@@ -96,7 +133,7 @@ export async function validateToken(token: string): Promise<UserProfile> {
  * Get all organizations for the authenticated user
  */
 export async function getOrganizations(token: string): Promise<Organization[]> {
-  const response = await fetch(`${INSFORGE_API_BASE}/organizations/v1`, {
+  const response = await platformFetch(`${INSFORGE_API_BASE}/organizations/v1`, {
     method: 'GET',
     headers: {
       'Authorization': `Bearer ${token}`,
@@ -120,7 +157,7 @@ export async function getOrganizations(token: string): Promise<Organization[]> {
  * Get all projects for an organization
  */
 export async function getProjects(token: string, organizationId: string): Promise<Project[]> {
-  const response = await fetch(`${INSFORGE_API_BASE}/organizations/v1/${organizationId}/projects`, {
+  const response = await platformFetch(`${INSFORGE_API_BASE}/organizations/v1/${organizationId}/projects`, {
     method: 'GET',
     headers: {
       'Authorization': `Bearer ${token}`,
@@ -144,7 +181,7 @@ export async function getProjects(token: string, organizationId: string): Promis
  * Get project details
  */
 export async function getProject(token: string, projectId: string): Promise<Project> {
-  const response = await fetch(`${INSFORGE_API_BASE}/projects/v1/${projectId}`, {
+  const response = await platformFetch(`${INSFORGE_API_BASE}/projects/v1/${projectId}`, {
     method: 'GET',
     headers: {
       'Authorization': `Bearer ${token}`,
@@ -168,7 +205,7 @@ export async function getProject(token: string, projectId: string): Promise<Proj
  * Get project access API key
  */
 export async function getProjectApiKey(token: string, projectId: string): Promise<string> {
-  const response = await fetch(`${INSFORGE_API_BASE}/projects/v1/${projectId}/access-api-key`, {
+  const response = await platformFetch(`${INSFORGE_API_BASE}/projects/v1/${projectId}/access-api-key`, {
     method: 'GET',
     headers: {
       'Authorization': `Bearer ${token}`,
@@ -209,7 +246,7 @@ export async function getProjectApiKey(token: string, projectId: string): Promis
  * revocation means, and it must not be reported to anyone as success.
  */
 export async function revokePlatformToken(token: string, clientId: string): Promise<void> {
-  const response = await fetch(`${INSFORGE_API_BASE}/oauth/v1/revoke`, {
+  const response = await platformFetch(`${INSFORGE_API_BASE}/oauth/v1/revoke`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
