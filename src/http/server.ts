@@ -26,6 +26,7 @@ import { renderProjectSelectionPage } from './templates/project-selection.js';
 import { renderOAuthErrorPage } from './templates/oauth-error.js';
 import { getAnalyticsService, extractClientInfo } from './analytics.js';
 import { sendUnauthorized, protectedResourceMetadata } from './auth-challenge.js';
+import { statusForHttpError } from './error-status.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
 
 // ============================================================================
@@ -402,7 +403,7 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
     res.redirect(authUrl.toString());
   } catch (error) {
     console.error('OAuth authorize error:', error);
-    res.status(500).json({
+    res.status(statusForHttpError(error)).json({
       error: 'server_error',
       error_description: 'Failed to initiate authorization',
     });
@@ -521,7 +522,7 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
       errorDescription: 'Failed to process callback',
       endpoint: '/oauth/callback',
     });
-    res.status(500).json({
+    res.status(statusForHttpError(error)).json({
       error: 'server_error',
       error_description: error instanceof Error ? error.message : 'Failed to process callback',
     });
@@ -561,7 +562,7 @@ app.get(OAUTH_ENDPOINTS.selectProject, async (req: Request, res: Response) => {
     }));
   } catch (error) {
     console.error('Project selection page error:', error);
-    res.status(500).send('Failed to load projects. Please try again.');
+    res.status(statusForHttpError(error)).send('Failed to load projects. Please try again.');
   }
 });
 
@@ -613,7 +614,7 @@ app.post(OAUTH_ENDPOINTS.selectProject, async (req: Request, res: Response) => {
     res.redirect(redirectUrl.toString());
   } catch (error) {
     console.error('Project selection error:', error);
-    res.status(500).json({
+    res.status(statusForHttpError(error)).json({
       error: 'server_error',
       error_description: error instanceof Error ? error.message : 'Failed to process project selection',
     });
@@ -736,7 +737,7 @@ app.get(API_ENDPOINTS.projects, async (req: Request, res: Response) => {
     res.json({ organizations: projects });
   } catch (error) {
     console.error('Get projects error:', error);
-    res.status(500).json({
+    res.status(statusForHttpError(error)).json({
       error: 'Failed to get projects',
       details: error instanceof Error ? error.message : 'Unknown error',
     });
@@ -770,7 +771,7 @@ app.post(API_ENDPOINTS.bindProject, async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('Bind project error:', error);
-    res.status(500).json({
+    res.status(statusForHttpError(error)).json({
       error: 'Failed to bind project',
       details: error instanceof Error ? error.message : 'Unknown error',
     });
