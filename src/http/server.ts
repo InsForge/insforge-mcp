@@ -989,6 +989,21 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
   // Check if we have an existing session in memory (must be Streamable HTTP transport)
   const existingRuntime = sessionId ? sessionManager.getStreamableSession(sessionId) : null;
 
+  // ROUTING HAPPENS BEFORE AUTHENTICATION, and that is deliberate — do not
+  // "harden" it by moving the token check above this.
+  //
+  // A client whose session died needs the 404 whether or not its token is also
+  // stale. Authenticate first and that client gets a 401 instead, sending it
+  // through an OAuth round trip to fix a problem it does not have; if its token
+  // is in fact fine, it re-authorizes, retries with the same dead session id
+  // and lands right back here. The 404 is the answer to "your session is gone",
+  // and it has to be reachable by a client that has nothing else wrong with it.
+  //
+  // Note for anyone auditing what is reachable unauthenticated: an existing
+  // session is served without a token check too, so the Mcp-Session-Id is a
+  // bearer credential in its own right. That is unchanged by this file's
+  // history — master does the same — and it is why the id is randomUUID() and
+  // never derived from anything guessable.
   const route = routeForSessionRequest({
     hasRuntime: existingRuntime !== null,
     sessionId,
