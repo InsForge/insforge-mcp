@@ -516,14 +516,14 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
 
     console.log('[OAuth] Token received, redirecting to project selection...');
 
-    const redis = getRedisClient();
-    await redis.setex(
-      `mcp:oauth:token:${state}`,
-      10 * 60,
-      tokens.access_token
-    );
+    // The token rides inside the state instead of a row keyed by it. The
+    // state_id therefore CHANGES here — it is the record, so a record with one
+    // more field is a different string.
+    const stateWithToken = oauthManager.attachPlatformToken(authState, tokens.access_token);
 
-    res.redirect(`${SERVER_CONFIG.publicUrl}${OAUTH_ENDPOINTS.selectProject}?state_id=${state}`);
+    res.redirect(
+      `${SERVER_CONFIG.publicUrl}${OAUTH_ENDPOINTS.selectProject}?state_id=${encodeURIComponent(stateWithToken)}`
+    );
   } catch (error) {
     console.error('OAuth callback error:', error);
     getAnalyticsService().trackOAuthFailure({
@@ -550,16 +550,16 @@ app.get(OAUTH_ENDPOINTS.selectProject, async (req: Request, res: Response) => {
 
   try {
     const oauthManager = getOAuthManager();
-    const redis = getRedisClient();
-
-    const token = await redis.get(`mcp:oauth:token:${state_id}`);
-    if (!token) {
-      return res.status(400).send('Session expired. Please start the authorization process again.');
-    }
 
     const authState = await oauthManager.getAuthorizationState(state_id as string);
     if (!authState) {
-      return res.status(400).send('Invalid or expired state');
+      return res.status(400).send('Session expired. Please start the authorization process again.');
+    }
+    const token = authState.platformAccessToken;
+    if (!token) {
+      // A state that never went through the callback. Same message: from the
+      // person's side these are the same event — a sign-in that did not finish.
+      return res.status(400).send('Session expired. Please start the authorization process again.');
     }
 
     const projectGroups = await oauthManager.getAvailableProjects(token);
@@ -590,20 +590,15 @@ app.post(OAUTH_ENDPOINTS.selectProject, async (req: Request, res: Response) => {
 
   try {
     const oauthManager = getOAuthManager();
-    const redis = getRedisClient();
-
-    const token = await redis.get(`mcp:oauth:token:${state_id}`);
-    if (!token) {
-      return res.status(400).send('Session expired. Please start the authorization process again.');
-    }
 
     const authState = await oauthManager.getAuthorizationState(state_id as string);
-    if (!authState) {
+    if (!authState?.platformAccessToken) {
       return res.status(400).json({
         error: 'invalid_request',
         error_description: 'Invalid or expired state',
       });
     }
+    const token = authState.platformAccessToken;
 
     const code = await oauthManager.createAuthorizationCode(
       state_id as string,
@@ -611,7 +606,8 @@ app.post(OAUTH_ENDPOINTS.selectProject, async (req: Request, res: Response) => {
       project_id as string
     );
 
-    await redis.del(`mcp:oauth:token:${state_id}`);
+    // Nothing to delete: the token was never stored. It stops being usable
+    // when the sealed state it rides in expires.
 
     const redirectUrl = new URL(authState.redirectUri);
     redirectUrl.searchParams.set('code', code);
