@@ -76,11 +76,30 @@ export interface HumanForm {
  * name, and that the package stores no tokens of its own (its single "oauth"
  * reference is an oauthScopes CONFIG field).
  *
- * What this still cannot promise: whether removing the config entry also drops
- * the client's saved OAuth registration is client-specific — add-mcp deletes
- * its config key and nothing more. If some client keys its registration by
- * server name rather than URL, even remove+add leaves it stuck. That is a real
- * test on a real editor, not something to settle in a comment.
+ * AND THE ANSWER, which is no. Blair ran these commands as a stuck user
+ * instead of reasoning about them: for Claude Code the saved authorisation
+ * lives in `mcpOAuth` under `name|sha256(type,url,headers)`, a store add-mcp
+ * never touches. Removing and re-adding the SAME url rebuilds the identical key
+ * and picks the dead registration straight back up. So on an unchanged
+ * hostname these commands do not repair anything on their own, and the page
+ * used to promise "this will complete normally" — a promise that would have
+ * been broken for exactly the population it was written for.
+ *
+ * The step that actually works is clearing the client's saved authorisation,
+ * and it is client-specific:
+ *
+ *   Claude Code   /mcp -> pick the server -> Clear authentication   (a UI action)
+ *   Codex         codex mcp logout insforge
+ *
+ * The Claude Code one is not a command, so it belongs in the sentence rather
+ * than in a code block a person would try to paste. On a NEW hostname the
+ * remove/add pair does repair by itself — different url, different key, no
+ * saved state — so both are printed and the wording no longer claims more than
+ * either can deliver.
+ *
+ * Still unverified, and stated rather than implied: nobody has watched a real
+ * Claude Code reuse that record against a live server. Blair proved the record
+ * survives the commands; the reuse is inferred from the key derivation.
  *
  * Built from publicUrl, which is the CANONICAL host this deployment is
  * configured to be — deliberately not the host the request arrived on. The Host
@@ -120,7 +139,11 @@ export function reconnectCommand(mcpUrl: string): string[] {
   // chunk-2LJORNPV.js). So passing the URL is exact, host-derived by
   // construction, and cannot drift the way a copy of their inference rule
   // would.
-  return [`npx add-mcp remove ${mcpUrl} -y`, `npx add-mcp ${mcpUrl}`];
+  return [
+    'codex mcp logout insforge',
+    `npx add-mcp remove ${mcpUrl} -y`,
+    `npx add-mcp ${mcpUrl}`,
+  ];
 }
 
 /**
@@ -134,12 +157,13 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
   switch (body.error) {
     case 'invalid_client':
       return {
-        heading: 'This connection needs to be set up again',
+        heading: 'Your client is holding a sign-in that no longer works',
         message:
-          'The app you are connecting from is not registered with this server any more. ' +
-          'Nothing is wrong with your account and no data was lost — remove the InsForge MCP ' +
-          'server from your client and add it back with the command below, and this will ' +
-          'complete normally.',
+          'Nothing is wrong with your account and no data was lost. Your editor has saved an ' +
+          'authorisation for this server that this server no longer recognises, and it will keep ' +
+          'reusing it until you clear it. In Claude Code: run /mcp, pick this server, and choose ' +
+          'Clear authentication. In Codex: run the first command below. Then reconnect with the ' +
+          'last one.',
         action: reconnectCommand(mcpUrl),
       };
 
@@ -149,11 +173,12 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
       // cause is not something the person can inspect, so saying "invalid
       // request" and stopping would be true and useless.
       return {
-        heading: 'This connection needs to be set up again',
+        heading: 'Your client is holding a sign-in that no longer works',
         message:
-          'The address your app asked us to send you back to is not the one it registered. ' +
-          'That usually means the app was reinstalled or restarted on a different port. ' +
-          'Re-adding the InsForge MCP server with the command below fixes it.',
+          'The address your app asked us to send you back to is not the one it registered — ' +
+          'usually because it restarted on a different port. Clearing the saved authorisation is ' +
+          'what fixes it. In Claude Code: run /mcp, pick this server, and choose Clear ' +
+          'authentication. In Codex: run the first command below. Then reconnect with the last.',
         action: reconnectCommand(mcpUrl),
       };
 
