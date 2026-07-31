@@ -118,7 +118,47 @@ async function postJson(path, payload) {
 }
 
 // --- health, and the deployed version -------------------------------------
-const health = await getJson('/health');
+//
+// On Manufact the mcp-use gateway answers /health ITSELF — a fixed
+// {"status":"healthy","timestamp":…} returned whether or not a container is
+// running behind it. Our handler never reaches the client, so the version and
+// session numbers are invisible and "what is actually deployed?" becomes
+// unanswerable from outside. That is precisely the blindness that let
+// production sit on a 139-day-old build.
+//
+// The app underneath is reachable directly: the platform exposes the Fly
+// hostname as `config.internalUrl` on the server record
+// (https://mcp-<serverId>-<deployNo>.fly.dev), and it serves OUR /health. Point
+// VERIFY_HEALTH_URL at it to check the build while every other assertion below
+// still runs against the public URL clients use.
+//
+//   VERIFY_HEALTH_URL=https://mcp-bf35bbc3-45.fly.dev \
+//     node scripts/verify-deploy.mjs https://keen-pulse-fsjr9.run.mcp-use.com 1.2.11
+//
+// Read it from the API each time — the hostname carries the deployment number,
+// so it changes on every deploy and must never be hardcoded.
+const healthBase = (process.env.VERIFY_HEALTH_URL || '').replace(/\/$/, '');
+const health = healthBase
+  ? await (async () => {
+      try {
+        const res = await fetch(healthBase + '/health', {
+          headers: { accept: 'application/json' },
+          signal: deadline(),
+        });
+        const text = await res.text();
+        let body;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = undefined;
+        }
+        return { status: res.status, body, headers: res.headers };
+      } catch (error) {
+        return { status: unreachable(error), body: undefined, headers: undefined };
+      }
+    })()
+  : await getJson('/health');
+if (healthBase) console.log(`  ~ /health read from ${healthBase} (gateway bypass)`);
 check('GET /health is 200', health.status === 200, `status ${health.status}`);
 if (typeof health.status === 'string' && health.status.startsWith('unreachable')) {
   // Everything below would fail the same way and bury the one fact that matters.
