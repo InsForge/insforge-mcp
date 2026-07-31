@@ -125,14 +125,20 @@ check(
 
 // Runtime sessions should not run away from the ones Redis still holds. A
 // small excess is normal in-flight; an order of magnitude is the leak.
+// `activeSessions` is null when the server is running without Redis, which is
+// not a failure — there is simply no second number to compare against, and a
+// default of 0 would silently turn "unknown" into "zero active" and grade a
+// real leak against it.
 const sessions = health.body?.sessions;
-if (sessions) {
-  const { activeSessions: active = 0, memorySessionCount: resident = 0 } = sessions;
+if (sessions && typeof sessions.activeSessions === 'number') {
+  const { activeSessions: active, memorySessionCount: resident = 0 } = sessions;
   check(
     'resident sessions are not far above active ones',
     resident <= Math.max(active * 2, active + 50),
     `active=${active} resident=${resident}`
   );
+} else if (sessions) {
+  console.log('  ~ session ratio not checked: no Redis, so there is no active count');
 }
 
 // --- the 401 has to tell a client where to look ---------------------------
@@ -220,6 +226,24 @@ check(
   'the authorize endpoint is reachable and validating',
   authorize.status === 400,
   `status ${authorize.status}`
+);
+
+// The bare probe above stops at the missing-parameter check, which is BEFORE
+// the client lookup — so it passes on a server that cannot log anyone in. A
+// probe carrying parameters reaches the lookup, and an unknown client there is
+// a 400 `invalid_client`. A 500 means the lookup itself failed: no Redis, or
+// no signing key. This is the difference between "the routes exist" and "a
+// login could start", and everything else in this file only proves the former.
+const authorizeWithParams = await getJson(
+  '/oauth/authorize?client_id=verify-deploy-probe' +
+    '&redirect_uri=http%3A%2F%2F127.0.0.1%3A1%2Fcb&response_type=code'
+);
+check(
+  'the client lookup on /oauth/authorize works (a login could start)',
+  authorizeWithParams.status === 400,
+  authorizeWithParams.status === 500
+    ? 'status 500 — the client lookup failed; the remaining Redis uses are not gone yet'
+    : `status ${authorizeWithParams.status}`
 );
 
 // --- follow the chain to whichever AS the resources name -------------------

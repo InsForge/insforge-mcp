@@ -9,7 +9,7 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 
 // Local imports
 import { getSessionManager } from './session-manager.js';
-import { getRedisClient, closeRedisClient, getRedisConfig } from './redis.js';
+import { getRedisClient, closeRedisClient, getRedisConfig, isRedisConfigured } from './redis.js';
 import { getOAuthManager } from './oauth-manager.js';
 import {
   SERVER_CONFIG,
@@ -1200,20 +1200,45 @@ async function startServer() {
     // Validate configuration
     validateConfig();
 
-    // Verify Redis connection
-    const redis = getRedisClient();
-    await redis.ping();
-    console.log('[Redis] Connection verified');
+    // Redis is on its way out of this server, and until the last use is gone a
+    // deploy without it should still boot. It used to exit 1 here, before
+    // app.listen, so nothing was reachable — not /health, not discovery, not
+    // even a log line naming the cause once the container had looped a few
+    // times. A server that answers and refuses to sign anyone in is far more
+    // diagnosable than one that is not there.
+    if (isRedisConfigured()) {
+      const redis = getRedisClient();
+      await redis.ping();
+      console.log('[Redis] Connection verified');
 
-    // Runtime sessions are only dropped on an explicit DELETE, which Streamable
-    // HTTP clients rarely send. Reap the ones Redis has already expired.
-    getSessionManager().startIdleSweep(SESSION_SWEEP_MS);
+      // Runtime sessions are only dropped on an explicit DELETE, which
+      // Streamable HTTP clients rarely send. Reap the ones Redis has already
+      // expired. Nothing to sweep when there is no Redis to expire them.
+      getSessionManager().startIdleSweep(SESSION_SWEEP_MS);
+    } else {
+      // Measured rather than assumed: with no Redis, /health and all four
+      // discovery documents answer 200 and POST /mcp gives its 401 challenge,
+      // which is everything needed to prove the edge routes us. /oauth/* still
+      // 500s — registration and auth state are the next slices — so the list
+      // below says so instead of promising a login that will not complete.
+      console.warn(
+        '[Redis] Not configured (no REDIS_URL or REDIS_HOST). ' +
+          'Serving /health, discovery and the 401 challenge; /oauth/* and every ' +
+          'session path will fail until the remaining Redis uses are removed.'
+      );
+    }
 
     const server = app.listen(SERVER_CONFIG.port, SERVER_CONFIG.host, () => {
       const redisConfig = getRedisConfig();
+      // The banner used to print "localhost:6379" whether or not anything was
+      // there, which is the same shape of lie as the REDIS_PASSWORD that looked
+      // configured and never reached ioredis. Print what is true.
+      const redisLine = isRedisConfigured()
+        ? `${redisConfig.host}:${redisConfig.port} (TLS: ${redisConfig.tls}, Cluster: ${redisConfig.cluster})`
+        : 'not configured — /oauth/* and sessions unavailable';
       console.log(`
 ╔═══════════════════════════════════════════════════════════════════════╗
-║           Insforge MCP Remote Server (OAuth + Redis)                  ║
+║              Insforge MCP Remote Server (OAuth)                       ║
 ╚═══════════════════════════════════════════════════════════════════════╝
 
 🚀 Server: http://${SERVER_CONFIG.host}:${SERVER_CONFIG.port}
@@ -1261,7 +1286,7 @@ async function startServer() {
    • Bind:       POST ${SERVER_CONFIG.publicUrl}${API_ENDPOINTS.bindProject}
 
 💾 Configuration:
-   • Redis:      ${redisConfig.host}:${redisConfig.port} (TLS: ${redisConfig.tls}, Cluster: ${redisConfig.cluster})
+   • Redis:      ${redisLine}
    • Insforge:   ${INSFORGE_CONFIG.apiBase}
    • Frontend:   ${INSFORGE_CONFIG.frontendUrl}
    • Analytics:  ${isAnalyticsConfigured() ? 'Mixpanel enabled' : 'Disabled (set MIXPANEL_TOKEN)'}
