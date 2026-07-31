@@ -65,7 +65,7 @@ describe('every browser-visible failure says what to do', () => {
     for (const error of ['invalid_client', 'invalid_request']) {
       const action = humanFormOf({ error }, MCP_URL).action as string[];
       expect(action).toEqual([
-        'npx add-mcp remove insforge -y',
+        `npx add-mcp remove ${MCP_URL} -y`,
         'npx add-mcp https://mcp.insforge.dev/mcp',
       ]);
       expect(action.join(' ')).not.toContain('@insforge/install');
@@ -84,13 +84,24 @@ describe('every browser-visible failure says what to do', () => {
     expect(second).toContain(MCP_URL);
   });
 
-  it('names the host the person is actually talking to', () => {
+  it('names the host the person is actually talking to, in BOTH commands', () => {
     // On the Manufact slug it must say the slug, or someone follows the
     // instruction and reconnects to the box we are migrating off.
-    expect(reconnectCommand('https://keen-pulse-fsjr9.run.mcp-use.com/mcp')).toEqual([
-      'npx add-mcp remove insforge -y',
-      'npx add-mcp https://keen-pulse-fsjr9.run.mcp-use.com/mcp',
+    //
+    // Both commands, because the removal used to hardcode "insforge" while the
+    // add step was host-derived: on the slug the removal then matched no
+    // server at all and the repair silently did nothing. add-mcp matches
+    // `server.identity === query` and identity is the URL for a remote entry,
+    // so passing the URL is exact on every host.
+    const slug = 'https://keen-pulse-fsjr9.run.mcp-use.com/mcp';
+    expect(reconnectCommand(slug)).toEqual([
+      `npx add-mcp remove ${slug} -y`,
+      `npx add-mcp ${slug}`,
     ]);
+    for (const command of reconnectCommand(slug)) {
+      expect(command).toContain('keen-pulse-fsjr9');
+      expect(command).not.toContain('insforge');
+    }
   });
 
   it('does not tell someone to reinstall when that would not help', () => {

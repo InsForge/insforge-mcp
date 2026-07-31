@@ -104,7 +104,23 @@ export interface HumanForm {
  * never reached. Measured, not inferred.
  */
 export function reconnectCommand(mcpUrl: string): string[] {
-  return ['npx add-mcp remove insforge -y', `npx add-mcp ${mcpUrl}`];
+  // Remove BY URL, not by name. The name is derived from the hostname, so a
+  // hardcoded "insforge" matches nothing on any host that infers a different
+  // key — including the Manufact slug we spent a day testing on:
+  //
+  //   mcp.insforge.dev                   -> key "insforge"
+  //   keen-pulse-fsjr9.run.mcp-use.com   -> key "keen-pulse-fsjr9"
+  //
+  // I made the ADD step host-derived and left the REMOVE step hardcoded, which
+  // is the same inconsistency in one function. Max caught it.
+  //
+  // The URL works because add-mcp's findMatchingServers matches
+  // `server.identity === query` as well as by name, and extractServerIdentity
+  // returns the server's url for a remote entry (add-mcp@2.0.0,
+  // chunk-2LJORNPV.js). So passing the URL is exact, host-derived by
+  // construction, and cannot drift the way a copy of their inference rule
+  // would.
+  return [`npx add-mcp remove ${mcpUrl} -y`, `npx add-mcp ${mcpUrl}`];
 }
 
 /**
