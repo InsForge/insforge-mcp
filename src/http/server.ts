@@ -25,6 +25,7 @@ import {
 import { renderProjectSelectionPage } from './templates/project-selection.js';
 import { renderOAuthErrorPage } from './templates/oauth-error.js';
 import { getAnalyticsService, extractClientInfo } from './analytics.js';
+import { sendUnauthorized, protectedResourceMetadata } from './auth-challenge.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
 
 // ============================================================================
@@ -189,15 +190,29 @@ app.get(OAUTH_ENDPOINTS.metadata, (_req: Request, res: Response) => {
 // OAuth 2.0 Protected Resource Metadata (for MCP discovery)
 // The resource field must match what the client is trying to access
 // Uses SERVER_CONFIG.publicUrl as the canonical base URL to avoid host header spoofing
-app.get(OAUTH_ENDPOINTS.protectedResource, (_req: Request, res: Response) => {
-  const baseUrl = SERVER_CONFIG.publicUrl;
+// One document per protected endpoint. RFC 9728 §3.1 derives the metadata URL
+// by inserting the well-known path between the host and the resource's path, and
+// §3.3 requires the `resource` value to be identical to the identifier that URL
+// was derived from — a client MUST discard a document that fails that check. So
+// the /mcp document lives under /.well-known/oauth-protected-resource/mcp and the
+// bare path describes the origin.
+app.get(
+  `${OAUTH_ENDPOINTS.protectedResource}${STREAMABLE_HTTP_ENDPOINTS.mcp}`,
+  (_req: Request, res: Response) => {
+    res.json(protectedResourceMetadata(STREAMABLE_HTTP_ENDPOINTS.mcp));
+  }
+);
 
-  // Resource must match the URL the MCP client is accessing (e.g. https://mcp.insforge.dev/mcp)
-  res.json({
-    resource: `${baseUrl}/mcp`,
-    authorization_servers: [baseUrl],
-    scopes_supported: ['mcp:read', 'mcp:write'],
-  });
+app.get(
+  `${OAUTH_ENDPOINTS.protectedResource}${SSE_ENDPOINTS.sse}`,
+  (_req: Request, res: Response) => {
+    res.json(protectedResourceMetadata(SSE_ENDPOINTS.sse));
+  }
+);
+
+// Kept for clients that probe the origin rather than following the challenge.
+app.get(OAUTH_ENDPOINTS.protectedResource, (_req: Request, res: Response) => {
+  res.json(protectedResourceMetadata());
 });
 
 // ============================================================================
@@ -810,20 +825,20 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
 
     if (!projectInfo) {
       if (!legacyApiKey && !oauthToken) {
-        return res.status(401).json({
+        return sendUnauthorized(res, {
           error: 'authentication_required',
           error_description: 'Missing authentication. Provide Authorization: Bearer <OAUTH_TOKEN> or X-Api-Key header.',
           oauth_authorize_url: `${SERVER_CONFIG.publicUrl}${OAUTH_ENDPOINTS.authorize}`,
-        });
+        }, STREAMABLE_HTTP_ENDPOINTS.mcp);
       }
 
       if (oauthToken && !legacyApiBaseUrl) {
-        return res.status(401).json({
+        return sendUnauthorized(res, {
           error: 'project_binding_required',
           error_description: 'OAuth token is valid but not bound to a project. Complete the OAuth flow or call POST /api/projects/{projectId}/bind',
           oauth_authorize_url: `${SERVER_CONFIG.publicUrl}${OAUTH_ENDPOINTS.authorize}`,
           projects_url: `${SERVER_CONFIG.publicUrl}${API_ENDPOINTS.projects}`,
-        });
+        }, STREAMABLE_HTTP_ENDPOINTS.mcp);
       }
 
       if (!legacyApiBaseUrl) {
@@ -841,10 +856,10 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
       // If we only have oauthToken without legacyApiKey, reject the request
       // because OAuth tokens are not interchangeable with API keys
       if (!legacyApiKey) {
-        return res.status(401).json({
+        return sendUnauthorized(res, {
           error: 'invalid_credentials',
           error_description: 'Legacy authentication requires X-Api-Key header. OAuth tokens cannot be used as API keys.',
-        });
+        }, STREAMABLE_HTTP_ENDPOINTS.mcp);
       }
 
       projectInfo = {
@@ -990,17 +1005,17 @@ app.get(SSE_ENDPOINTS.sse, async (req: Request, res: Response) => {
 
   if (!projectInfo) {
     if (!legacyApiKey && !oauthToken) {
-      return res.status(401).json({
+      return sendUnauthorized(res, {
         error: 'authentication_required',
         error_description: 'Missing authentication. Provide Authorization: Bearer <OAUTH_TOKEN> or X-Api-Key header.',
-      });
+      }, SSE_ENDPOINTS.sse);
     }
 
     if (oauthToken && !legacyApiBaseUrl) {
-      return res.status(401).json({
+      return sendUnauthorized(res, {
         error: 'project_binding_required',
         error_description: 'OAuth token is valid but not bound to a project. Complete the OAuth flow.',
-      });
+      }, SSE_ENDPOINTS.sse);
     }
 
     if (!legacyApiBaseUrl || !legacyApiKey) {
