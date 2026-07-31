@@ -93,7 +93,7 @@ const AUTH_CODE_TTL = 5 * 60; // 5 minutes
 /**
  * Generate a hash of the token for storage
  */
-function hashToken(token: string): string {
+export function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
