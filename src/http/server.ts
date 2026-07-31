@@ -894,9 +894,24 @@ app.get(API_ENDPOINTS.projects, async (req: Request, res: Response) => {
 
   const token = authHeader.substring(7);
 
+  // UNSEAL FIRST. This handed our own bearer straight to the platform, which
+  // worked only while the bearer WAS a platform token. Since the token became a
+  // sealed envelope, the platform receives a string it has never issued and
+  // answers 401 — so `/api/projects` has been broken for every caller, and with
+  // it `list-projects`, the capability this whole design exists to enable.
+  //
+  // The bug is the shape the sealed token invites: every place that used to
+  // forward the bearer now has to open it and forward what is INSIDE. This was
+  // the last one, and it was missed because nothing calls this endpoint in
+  // tests — the project-selection page is its only real caller.
+  const payload = readAccessToken(token, accessTokenKey());
+  if (!payload) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+
   try {
     const oauthManager = getOAuthManager();
-    const projects = await oauthManager.getAvailableProjects(token);
+    const projects = await oauthManager.getAvailableProjects(payload.platformAccessToken);
     res.json({ organizations: projects });
   } catch (error) {
     console.error('Get projects error:', error);
