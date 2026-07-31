@@ -565,7 +565,12 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
       errorDescription: 'Failed to process callback',
       endpoint: '/oauth/callback',
     });
-    res.status(statusForHttpError(error)).json({
+    // The EIGHTH browser-reachable branch, and the third time on this PR that
+    // I converted the ones I could see and missed one. The callback is a
+    // browser navigation end to end, so its outer catch is as visible as any
+    // branch inside it. Counting is not the method; routing everything through
+    // one helper is, and this is the last place that was not.
+    sendOAuthError(req, res, statusForHttpError(error), {
       error: 'server_error',
       error_description: error instanceof Error ? error.message : 'Failed to process callback',
     });
