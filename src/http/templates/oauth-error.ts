@@ -10,8 +10,14 @@
 export interface OAuthErrorPageOptions {
   heading: string;
   message: string;
-  /** Optional literal the user should run or check. Rendered as code. */
-  action?: string;
+  /**
+   * Optional literal(s) the user should run or check, rendered as code.
+   *
+   * A list as well as a string because a repair is sometimes a sequence, and
+   * joining commands with a newline inside one inline <code> collapses them
+   * into a single unrunnable line.
+   */
+  action?: string | string[];
 }
 
 export function renderOAuthErrorPage(options: OAuthErrorPageOptions): string {
@@ -91,7 +97,9 @@ export function renderOAuthErrorPage(options: OAuthErrorPageOptions): string {
   <div class="card">
     <h1>${escapeHtml(heading)}</h1>
     <p>${escapeHtml(message)}</p>
-    ${action ? `<code>${escapeHtml(action)}</code>` : ''}
+    ${(action ? (Array.isArray(action) ? action : [action]) : [])
+      .map((line) => `<code>${escapeHtml(line)}</code>`)
+      .join('\n    ')}
   </div>
 </body>
 </html>`;
