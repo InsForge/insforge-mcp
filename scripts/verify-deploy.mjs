@@ -95,8 +95,70 @@ async function getJson(path) {
   return { status: res.status, body, headers: res.headers };
 }
 
+async function postJson(path, payload) {
+  let res;
+  try {
+    res = await fetch(base + path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(payload),
+      signal: deadline(),
+    });
+  } catch (error) {
+    return { status: unreachable(error), body: undefined, headers: undefined };
+  }
+  const text = await res.text();
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = undefined;
+  }
+  return { status: res.status, body, headers: res.headers };
+}
+
 // --- health, and the deployed version -------------------------------------
-const health = await getJson('/health');
+//
+// On Manufact the mcp-use gateway answers /health ITSELF — a fixed
+// {"status":"healthy","timestamp":…} returned whether or not a container is
+// running behind it. Our handler never reaches the client, so the version and
+// session numbers are invisible and "what is actually deployed?" becomes
+// unanswerable from outside. That is precisely the blindness that let
+// production sit on a 139-day-old build.
+//
+// The app underneath is reachable directly: the platform exposes the Fly
+// hostname as `config.internalUrl` on the server record
+// (https://mcp-<serverId>-<deployNo>.fly.dev), and it serves OUR /health. Point
+// VERIFY_HEALTH_URL at it to check the build while every other assertion below
+// still runs against the public URL clients use.
+//
+//   VERIFY_HEALTH_URL=https://mcp-bf35bbc3-45.fly.dev \
+//     node scripts/verify-deploy.mjs https://keen-pulse-fsjr9.run.mcp-use.com 1.2.11
+//
+// Read it from the API each time — the hostname carries the deployment number,
+// so it changes on every deploy and must never be hardcoded.
+const healthBase = (process.env.VERIFY_HEALTH_URL || '').replace(/\/$/, '');
+const health = healthBase
+  ? await (async () => {
+      try {
+        const res = await fetch(healthBase + '/health', {
+          headers: { accept: 'application/json' },
+          signal: deadline(),
+        });
+        const text = await res.text();
+        let body;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = undefined;
+        }
+        return { status: res.status, body, headers: res.headers };
+      } catch (error) {
+        return { status: unreachable(error), body: undefined, headers: undefined };
+      }
+    })()
+  : await getJson('/health');
+if (healthBase) console.log(`  ~ /health read from ${healthBase} (gateway bypass)`);
 check('GET /health is 200', health.status === 200, `status ${health.status}`);
 if (typeof health.status === 'string' && health.status.startsWith('unreachable')) {
   // Everything below would fail the same way and bury the one fact that matters.
@@ -230,21 +292,54 @@ check(
 
 // The bare probe above stops at the missing-parameter check, which is BEFORE
 // the client lookup — so it passes on a server that cannot log anyone in. A
-// probe carrying parameters reaches the lookup, and an unknown client there is
-// a 400 `invalid_client`. A 500 means the lookup itself failed: no Redis, or
-// no signing key. This is the difference between "the routes exist" and "a
-// login could start", and everything else in this file only proves the former.
-const authorizeWithParams = await getJson(
-  '/oauth/authorize?client_id=verify-deploy-probe' +
-    '&redirect_uri=http%3A%2F%2F127.0.0.1%3A1%2Fcb&response_type=code'
-);
+// probe carrying parameters gets further.
+//
+// But a MADE-UP client id is not far enough, and this is the second time this
+// file has been fooled by the same shape. Since signed client ids landed, an
+// unregistered id fails signature verification and returns 400 `invalid_client`
+// — still short of the authorization-state write. Measured against the Manufact
+// deployment, which cannot log anyone in:
+//
+//   client_id=verify-deploy-probe (made up)  -> 400   <- reads as healthy
+//   client_id minted by /oauth/register      -> 500   <- the truth
+//
+// So mint one. Post-signed-ids `/oauth/register` stores nothing server-side —
+// the id IS the registration — so this keeps the script's read-only contract
+// while reaching the first thing in the flow that actually needs backing state.
+const registration = await postJson('/oauth/register', {
+  client_name: 'verify-deploy probe',
+  redirect_uris: ['http://127.0.0.1:1/cb'],
+  grant_types: ['authorization_code'],
+  response_types: ['code'],
+});
 check(
-  'the client lookup on /oauth/authorize works (a login could start)',
-  authorizeWithParams.status === 400,
-  authorizeWithParams.status === 500
-    ? 'status 500 — the client lookup failed; the remaining Redis uses are not gone yet'
-    : `status ${authorizeWithParams.status}`
+  'a client can register (/oauth/register)',
+  registration.status === 200 || registration.status === 201,
+  registration.body?.error_description || `status ${registration.status}`
 );
+
+const mintedId = registration.body?.client_id;
+if (mintedId) {
+  const authorizeAsClient = await getJson(
+    '/oauth/authorize?response_type=code' +
+      `&client_id=${encodeURIComponent(mintedId)}` +
+      '&redirect_uri=' + encodeURIComponent('http://127.0.0.1:1/cb')
+  );
+  check(
+    'a real registered client can start a login (/oauth/authorize)',
+    authorizeAsClient.status !== 500,
+    authorizeAsClient.status === 500
+      ? `status 500 — ${authorizeAsClient.body?.error_description || 'authorize failed'}; ` +
+        'the flow still needs backing state it cannot reach (remaining Redis uses)'
+      : `status ${authorizeAsClient.status}`
+  );
+} else {
+  check(
+    'a real registered client can start a login (/oauth/authorize)',
+    false,
+    'not attempted — registration did not return a client_id'
+  );
+}
 
 // --- follow the chain to whichever AS the resources name -------------------
 // This is the client's next hop, so it gets checked whether the AS is us or the
