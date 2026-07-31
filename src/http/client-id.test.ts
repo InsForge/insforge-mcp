@@ -3,7 +3,6 @@ import {
   mintClientId,
   readClientId,
   isRegisteredRedirectUri,
-  generateSigningSecret,
   InvalidClientIdError,
 } from './client-id.js';
 
@@ -107,16 +106,21 @@ describe('redirect_uri matching', () => {
   });
 });
 
-describe('generateSigningSecret', () => {
-  it('produces distinct high-entropy secrets', () => {
-    const a = generateSigningSecret();
-    const b = generateSigningSecret();
-    expect(a).not.toBe(b);
-    expect(a.length).toBeGreaterThanOrEqual(32);
+describe('a missing secret is never silently substituted', () => {
+  it('refuses to mint or read without one', () => {
+    // Quinn's catch: a per-boot generated fallback would invalidate every
+    // client id on every restart, handing every user the re-add page at once
+    // — a mass logout dressed up as a convenience. There is deliberately no
+    // way to get a working signer without supplying the secret, so wiring
+    // cannot reach for one by accident.
+    for (const missing of ['', undefined as unknown as string, null as unknown as string]) {
+      expect(() => mintClientId({ redirect_uris: [CALLBACK] }, missing)).toThrow();
+      expect(() => readClientId('mcp_a.b', missing)).toThrow();
+    }
   });
 
-  it('ids minted under one generated secret do not verify under another', () => {
-    const id = mintClientId({ redirect_uris: [CALLBACK] }, generateSigningSecret());
-    expect(() => readClientId(id, generateSigningSecret())).toThrow(InvalidClientIdError);
+  it('exports no secret generator', async () => {
+    const mod = await import('./client-id.js');
+    expect(Object.keys(mod)).not.toContain('generateSigningSecret');
   });
 });

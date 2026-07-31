@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { createHmac, timingSafeEqual } from 'crypto';
 
 /**
  * Client registrations as signed values rather than stored rows.
@@ -126,9 +126,4 @@ export function isRegisteredRedirectUri(
   redirectUri: unknown
 ): boolean {
   return typeof redirectUri === 'string' && registration.redirect_uris.includes(redirectUri);
-}
-
-/** A signing secret for local runs, so the server starts without configuration. */
-export function generateSigningSecret(): string {
-  return randomBytes(32).toString('base64url');
 }
