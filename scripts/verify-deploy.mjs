@@ -222,6 +222,38 @@ check(
   `status ${authorize.status}`
 );
 
+// The two checks above are both satisfied by the argument-validation layer,
+// which answers before the handler touches its client store. That is exactly
+// how this script scored a PASS on a deployment where no user could log in:
+// registration and authorize were both 500ing on
+// `MaxRetriesPerRequestError (ioredis)`, and a parameterless probe never got
+// far enough to see it.
+//
+// So send a request that is complete enough to reach the store. The client id
+// is deliberately one that cannot exist: a server whose store is healthy looks
+// it up, misses, and says so; a server whose store is unreachable cannot get
+// that far. Both outcomes are 4xx-vs-5xx, and neither registers anything, so
+// the script stays read-only.
+//
+//   400 invalid_client -> store reached, id genuinely unknown  (healthy)
+//   500                -> the lookup itself failed             (broken)
+const probeAuthorize = await getJson(
+  '/oauth/authorize?response_type=code' +
+    '&client_id=verify-deploy-probe-not-a-real-client' +
+    '&redirect_uri=' + encodeURIComponent('http://127.0.0.1:33418/callback') +
+    '&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM' +
+    '&code_challenge_method=S256' +
+    '&state=verify-deploy'
+);
+check(
+  'a fully-formed authorize request reaches the client store',
+  probeAuthorize.status !== 500,
+  probeAuthorize.status === 500
+    ? 'authorize 500s on a complete request — the client store is unreachable, ' +
+      'so no login can complete (check Redis/backing store)'
+    : `status ${probeAuthorize.status}`
+);
+
 // --- follow the chain to whichever AS the resources name -------------------
 // This is the client's next hop, so it gets checked whether the AS is us or the
 // platform. RFC 8414 §3.1 derives the URL the same way RFC 9728 does — insert
