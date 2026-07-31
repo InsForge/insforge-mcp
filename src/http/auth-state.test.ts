@@ -133,3 +133,42 @@ describe(`a wrong key is our fault, not the caller's`, () => {
     }
   });
 });
+
+describe('the TTL is per-value, because a code is not a state', () => {
+  const KEY2 = deriveAuthStateKey('another-secret');
+  const T0 = 1_700_000_000_000;
+
+  it('honours a shorter TTL than the default', () => {
+    // RFC 6749 §4.1.2 wants an authorization code short-lived, and a code that
+    // cannot be single-use (nothing to delete) wants it more. Five minutes for
+    // codes, ten for state.
+    const sealed = sealAuthState({ code: true }, KEY2, T0, 5 * 60);
+    expect(openAuthState(sealed, KEY2, T0 + 5 * 60 * 1000 - 1)).toEqual({ code: true });
+    expect(() => openAuthState(sealed, KEY2, T0 + 5 * 60 * 1000)).toThrow(InvalidAuthStateError);
+  });
+
+  it('still defaults to the state TTL when none is given', () => {
+    const sealed = sealAuthState({ state: true }, KEY2, T0);
+    expect(openAuthState(sealed, KEY2, T0 + AUTH_STATE_TTL_SECONDS * 1000 - 1)).toEqual({ state: true });
+    expect(() => openAuthState(sealed, KEY2, T0 + AUTH_STATE_TTL_SECONDS * 1000)).toThrow();
+  });
+});
+
+describe('three purposes, three keys', () => {
+  it(`gives each label a key that rejects the other's output`, async () => {
+    const { deriveAuthCodeKey } = await import('./config.js');
+    const secret = 'one-secret-three-purposes';
+    const stateKey = deriveAuthStateKey(secret);
+    const codeKey = deriveAuthCodeKey(secret);
+
+    expect(stateKey.equals(codeKey)).toBe(false);
+    // An auth code must not be openable as an auth state, or a weakness in the
+    // most exposed value reaches the other.
+    expect(() => openAuthState(sealAuthState({ x: 1 }, codeKey), stateKey)).toThrow(
+      InvalidAuthStateError
+    );
+    expect(() => openAuthState(sealAuthState({ x: 1 }, stateKey), codeKey)).toThrow(
+      InvalidAuthStateError
+    );
+  });
+});

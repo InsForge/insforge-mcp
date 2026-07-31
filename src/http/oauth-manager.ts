@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'crypto';
 import { getRedisClient } from './redis.js';
 import { sealAuthState, openAuthState, InvalidAuthStateError } from './auth-state.js';
 import { newStateHandle } from './auth-state-cookie.js';
-import { authStateKey } from './config.js';
+import { authStateKey, authCodeKey } from './config.js';
 import {
   validateToken,
   getProjectAccess,
@@ -103,7 +103,6 @@ interface TokenBinding {
 
 // Redis key prefixes
 const TOKEN_BINDING_PREFIX = 'mcp:auth:binding:';
-const AUTH_CODE_PREFIX = 'mcp:auth:code:';
 
 // TTLs
 const AUTH_CODE_TTL = 5 * 60; // 5 minutes
@@ -252,18 +251,39 @@ export class OAuthManager {
       JSON.stringify(binding)
     );
 
-    // Create authorization code that references the token hash
-    const code = generateCode();
-    await redis.setex(
-      AUTH_CODE_PREFIX + code,
-      AUTH_CODE_TTL,
-      JSON.stringify({
+    // PKCE is REQUIRED for a sealed code, and this is the one place the
+    // stateless rewrite genuinely tightens behaviour rather than preserving it.
+    //
+    // GETDEL made the stored code single-use: redeemed once, gone. A sealed
+    // code cannot be single-use — there is nothing to delete — so it is
+    // replayable for its lifetime. What makes that acceptable is PKCE: a
+    // replayed code without the verifier is useless, and the verifier never
+    // leaves the client. Without PKCE a replay is a full second session, so the
+    // honest choice is to refuse rather than to issue a code we cannot protect.
+    //
+    // Nothing real is lost. The MCP spec requires PKCE of public clients, the
+    // SDK always sends it, and our AS metadata already advertises S256 as the
+    // only supported method — so this refuses a combination we never told
+    // anyone we would accept.
+    if (!authState.codeChallenge) {
+      throw new Error(
+        'PKCE is required: this server issues authorization codes that carry their own ' +
+          'state, and the code_challenge is what stops a replayed code from being redeemed.'
+      );
+    }
+
+    // The code IS the record. Five minutes, not the state's ten: RFC 6749
+    // §4.1.2 wants a code short-lived, and a replayable one wants it more.
+    const code = sealAuthState(
+      {
         tokenHash,
-        stateId,
         redirectUri: authState.redirectUri,
         codeChallenge: authState.codeChallenge,
         codeChallengeMethod: authState.codeChallengeMethod,
-      })
+      },
+      authCodeKey(),
+      Date.now(),
+      AUTH_CODE_TTL
     );
 
     // Nothing to clean up: the state was never stored. It stops being accepted
@@ -289,26 +309,33 @@ export class OAuthManager {
     redirectUri: string,
     codeVerifier?: string
   ): Promise<{ tokenHash: string }> {
-    const redis = getRedisClient();
-
-    // Atomically get and delete the code to prevent replay attacks
-    // GETDEL returns the value and deletes the key in one operation
-    const codeData = await redis.getdel(AUTH_CODE_PREFIX + code);
-
-    if (!codeData) {
+    // No GETDEL, because there is nothing stored. Replay is bounded by PKCE
+    // (required at issue time) and by the five-minute expiry sealed inside.
+    let payload: {
+      tokenHash: string;
+      redirectUri: string;
+      codeChallenge?: string;
+      codeChallengeMethod?: string;
+    };
+    try {
+      payload = openAuthState(code, authCodeKey());
+    } catch {
       throw new Error('Invalid or expired authorization code');
     }
 
-    const { tokenHash, redirectUri: storedRedirectUri, codeChallenge, codeChallengeMethod } =
-      JSON.parse(codeData);
+    const { tokenHash, redirectUri: storedRedirectUri, codeChallenge, codeChallengeMethod } = payload;
 
     // Validate redirect URI
     if (redirectUri !== storedRedirectUri) {
       throw new Error('Redirect URI mismatch');
     }
 
-    // Validate PKCE if code challenge was provided during authorization
-    if (codeChallenge) {
+    // Unconditional now: a code without a challenge cannot be issued, so one
+    // arriving without it is not ours to honour.
+    if (!codeChallenge) {
+      throw new Error('Authorization code is missing its code challenge');
+    }
+    {
       if (!codeVerifier) {
         throw new Error('Code verifier required');
       }

@@ -179,6 +179,28 @@ export function authStateKey(): Buffer {
   return deriveAuthStateKey(INSFORGE_CONFIG.clientSecret);
 }
 
+/**
+ * And a third key, for authorization codes. Same secret, third label.
+ *
+ * Three purposes, three keys, no relationship between them: a client id is
+ * public and signed, an auth state is secret and encrypted, an auth code is a
+ * bearer credential in its own right. Sharing one key across all three would
+ * mean a weakness in the most exposed use reaches the other two.
+ */
+const AUTH_CODE_KEY_LABEL = 'mcp-auth-code-v1';
+
+export function deriveAuthCodeKey(clientSecret: string): Buffer {
+  if (!clientSecret) {
+    throw new Error('INSFORGE_CLIENT_SECRET is required: the authorization code key is derived from it');
+  }
+  return createHmac('sha256', clientSecret).update(AUTH_CODE_KEY_LABEL).digest();
+}
+
+/** Lazy for the same reason as the others. */
+export function authCodeKey(): Buffer {
+  return deriveAuthCodeKey(INSFORGE_CONFIG.clientSecret);
+}
+
 // ============================================================================
 // Redis Configuration
 // ============================================================================
