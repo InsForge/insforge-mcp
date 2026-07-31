@@ -102,13 +102,25 @@ describe('redirect_uri matching', () => {
     }
   });
 
-  it('treats the scheme as case-insensitive, because it is', () => {
-    // This used to be asserted as a near-miss and rejected, which was an
-    // artifact of comparing strings rather than URLs. RFC 3986 §3.1 makes the
-    // scheme case-insensitive, the destination is byte-identical, and the
-    // platform's matchRedirectUri normalises the same way. Changed deliberately
-    // when loopback matching started parsing instead of comparing text.
+  it('is case-insensitive about the scheme ON LOOPBACK ONLY, exactly like the platform', () => {
+    // My first version of this test claimed scheme case-insensitivity as a
+    // general property — "because it is", RFC 3986 §3.1. That overclaimed:
+    // normalisation only happens on the loopback branch, because that is the
+    // only branch that parses instead of comparing text.
+    //
+    // The right fix is to narrow the claim, NOT to widen the code. The
+    // platform's matchRedirectUri is byte-exact for non-loopback too
+    // (insforge-cloud-backend src/utils/oauth.ts:412), so parsing everything
+    // would make us diverge from the server we are deliberately mirroring.
+    // Pinned in both directions so neither drifts silently.
     expect(isRegisteredRedirectUri(reg, 'HTTP://127.0.0.1:8765/callback')).toBe(true);
+
+    const routable = readClientId(
+      mintClientId({ redirect_uris: ['https://app.example/cb'] }, SECRET),
+      SECRET
+    );
+    expect(isRegisteredRedirectUri(routable, 'https://app.example/cb')).toBe(true);
+    expect(isRegisteredRedirectUri(routable, 'HTTPS://app.example/cb')).toBe(false);
   });
 
   it('rejects non-strings', () => {
