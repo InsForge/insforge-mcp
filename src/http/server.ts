@@ -899,7 +899,7 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
       });
     } catch (error) {
       console.error('[Streamable HTTP] Failed to create session:', error);
-      return res.status(statusForHttpError(error)).json({
+      return res.status(500).json({
         error: 'Failed to create session',
         details: error instanceof Error ? error.message : 'Unknown error',
       });
