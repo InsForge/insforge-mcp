@@ -49,7 +49,7 @@ import { ACCESS_TOKEN_TTL_SECONDS, accessTokenLifetimeSeconds, readAccessToken }
 import { getProjectKeyCache } from './project-key-cache.js';
 import { accessTokenKey } from './config.js';
 import { statusForHttpError, isAuthorizationRefusal } from './error-status.js';
-import { revokePlatformToken } from './insforge-api.js';
+import { revokePlatformToken, exchangePlatformCode, type PlatformTokens } from './insforge-api.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
 
 // ============================================================================
@@ -639,27 +639,63 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
     }
 
     console.log('[OAuth] Exchanging code for tokens...');
-    const tokenResponse = await fetch(`${INSFORGE_CONFIG.apiBase}/api/oauth/v1/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        grant_type: 'authorization_code',
-        code: code,
-        redirect_uri: OAUTH_CONFIG.callbackUrl,
-        client_id: INSFORGE_CONFIG.clientId,
-        client_secret: INSFORGE_CONFIG.clientSecret,
-        code_verifier: authState.insforgeCodeVerifier,
-      }),
-    });
 
-    const tokens = await tokenResponse.json() as {
-      access_token?: string;
-      refresh_token?: string;
-      token_type?: string;
-      expires_in?: number;
-      error?: string;
-      error_description?: string;
-    };
+    // THE THIRD UPSTREAM CALL, and the one that renders in a person's browser.
+    //
+    // Iris forced the platform unroutable on a branch env and drove this path
+    // without a login — /oauth/authorize is unauthenticated, so a stranger can
+    // reach the exchange:
+    //
+    //   platform reachable    400 invalid_grant     (the platform's own answer)
+    //   platform unroutable   500 "fetch failed"    Node's raw message, no Retry-After
+    //
+    // My own rule — 401 when the credential is the problem, 5xx when we could
+    // not tell — held on revoke and resolve and not here, which is exactly the
+    // shape that reads as done and is not. A mid-sign-in platform blip showed a
+    // human `server_error: fetch failed` on the callback page.
+    //
+    // The two cases are now separated by WHERE they are handled: a thrown error
+    // means we could not reach the platform and falls to the catch below, which
+    // answers 503; a parsed body with an `error` field means the platform
+    // answered and declined, which stays a 400.
+    let tokens: PlatformTokens;
+    try {
+      tokens = await exchangePlatformCode({
+        code: code as string,
+        redirectUri: OAUTH_CONFIG.callbackUrl,
+        clientId: INSFORGE_CONFIG.clientId,
+        clientSecret: INSFORGE_CONFIG.clientSecret,
+        codeVerifier: authState.insforgeCodeVerifier,
+      });
+    } catch (error) {
+      console.error('[OAuth] Could not reach the platform to exchange the code:', error);
+      getAnalyticsService().trackOAuthFailure({
+        errorType: 'temporarily_unavailable',
+        errorDescription: 'Token exchange could not reach the platform',
+        endpoint: '/oauth/callback',
+      });
+      res.set('Retry-After', '5');
+      return sendOAuthError(
+        req,
+        res,
+        503,
+        {
+          error: 'temporarily_unavailable',
+          // Deliberately not the raw error. "fetch failed" is Node talking to
+          // itself; it tells the person nothing and is what was reaching the
+          // browser before.
+          error_description:
+            'The InsForge platform could not be reached to complete this sign-in.',
+        },
+        {
+          heading: 'InsForge could not be reached',
+          message:
+            'This is temporary and nothing is wrong with your account or your editor. ' +
+            'Wait a moment and start the sign-in again.',
+          action: undefined,
+        }
+      );
+    }
 
     if (tokens.error || !tokens.access_token) {
       console.error('[OAuth] Token exchange error:', tokens);
