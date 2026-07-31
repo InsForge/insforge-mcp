@@ -67,6 +67,7 @@ describe('every browser-visible failure says what to do', () => {
       expect(action).toEqual([
         'codex mcp logout insforge',
         `npx add-mcp remove ${MCP_URL} -y`,
+        `npx add-mcp remove ${MCP_URL} -g -y`,
         'npx add-mcp https://mcp.insforge.dev/mcp',
       ]);
       expect(action.join(' ')).not.toContain('@insforge/install');
@@ -84,9 +85,14 @@ describe('every browser-visible failure says what to do', () => {
     // rebuilds the SAME mcpOAuth key and picks the dead registration back up,
     // so the commands alone repair nothing. Clearing the client's saved
     // authorisation is the step that works, and it comes first.
-    const [logout, remove, add] = reconnectCommand(MCP_URL);
+    const [logout, removeProject, removeGlobal, add] = reconnectCommand(MCP_URL);
     expect(logout).toContain('logout');
-    expect(remove).toContain('remove');
+    expect(removeProject).toContain('remove');
+    // TWO removes: add-mcp's -g means "instead of project-level", not "as
+    // well as", so one command clears one scope and reports success while the
+    // other copy survives. Blair measured that on a machine with both.
+    expect(removeGlobal).toContain('remove');
+    expect(removeGlobal).toContain('-g');
     expect(add).toContain(MCP_URL);
   });
 
@@ -114,6 +120,7 @@ describe('every browser-visible failure says what to do', () => {
     expect(reconnectCommand(slug)).toEqual([
       'codex mcp logout insforge',
       `npx add-mcp remove ${slug} -y`,
+      `npx add-mcp remove ${slug} -g -y`,
       `npx add-mcp ${slug}`,
     ]);
     // The two add-mcp commands are host-derived; the codex one names the
@@ -152,5 +159,37 @@ describe('prefersHtml', () => {
 
   it('is true for a browser', () => {
     expect(prefersHtml(asBrowser)).toBe(true);
+  });
+});
+
+describe('the repair clears every scope it can live in', () => {
+  /**
+   * A server can be defined in two scopes at once, and add-mcp's remove clears
+   * exactly one per invocation:
+   *
+   *   .option("-g, --global", "Remove from global configs INSTEAD OF
+   *                            project-level")
+   *
+   * "instead of" is the defect. The page printed one remove, it reported
+   * "Removed 1 server", and the other copy survived — so a stuck user
+   * re-added and stayed stuck, told it had worked. Adding `-g` instead of the
+   * plain form would only move which scope is missed.
+   */
+
+  const URL_ = 'https://keen-pulse-fsjr9.run.mcp-use.com/mcp';
+
+  it('issues a remove for BOTH scopes, not one', () => {
+    const removes = reconnectCommand(URL_).filter((c) => c.includes('remove'));
+    expect(removes).toHaveLength(2);
+    expect(removes.some((c) => !c.includes('-g'))).toBe(true);  // project scope
+    expect(removes.some((c) => c.includes('-g'))).toBe(true);   // global scope
+  });
+
+  it('removes before it re-adds, in that order', () => {
+    // Re-adding first would rebuild the entry the removal is meant to clear.
+    const cmds = reconnectCommand(URL_);
+    const lastRemove = cmds.map((c) => c.includes('remove')).lastIndexOf(true);
+    const add = cmds.findIndex((c) => c.includes('add-mcp') && !c.includes('remove'));
+    expect(add).toBeGreaterThan(lastRemove);
   });
 });
