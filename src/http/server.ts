@@ -45,10 +45,11 @@ import {
   isAcceptableClientState,
   MAX_CLIENT_STATE_LENGTH,
 } from './auth-state-cookie.js';
-import { ACCESS_TOKEN_TTL_SECONDS, readAccessToken } from './access-token.js';
+import { ACCESS_TOKEN_TTL_SECONDS, accessTokenLifetimeSeconds, readAccessToken } from './access-token.js';
 import { getProjectKeyCache } from './project-key-cache.js';
 import { accessTokenKey } from './config.js';
-import { statusForHttpError } from './error-status.js';
+import { statusForHttpError, isAuthorizationRefusal } from './error-status.js';
+import { revokePlatformToken } from './insforge-api.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
 
 // ============================================================================
@@ -137,7 +138,7 @@ function tokenFingerprint(token: string): string {
 /**
  * Resolve project information from OAuth token
  */
-async function resolveProjectFromToken(token: string): Promise<{
+interface ResolvedProject {
   apiKey: string;
   apiBaseUrl: string;
   projectId: string;
@@ -145,33 +146,76 @@ async function resolveProjectFromToken(token: string): Promise<{
   userId: string;
   organizationId: string;
   oauthTokenHash: string;
-} | null> {
+}
+
+/**
+ * Three outcomes, not two.
+ *
+ * `unavailable` is the one that had to be added back. #95 collapsed every
+ * failure into "no project" so that a stale token could not produce a 500 with
+ * no challenge, and the justification I wrote was that the client's available
+ * action is identical either way. **It stops being identical the moment a retry
+ * would have worked** — which is exactly a platform blip. Iris named that, and
+ * she is right: the rule is 401 when the credential is the problem, 5xx when we
+ * could not tell.
+ *
+ * Both halves still matter. Reporting a fault as 401 drags a user through a
+ * browser login to fix something that would have cleared on its own; reporting
+ * a dead credential as 500 tells the client to give up when signing in again is
+ * exactly what it should do.
+ */
+type ProjectResolution =
+  | { outcome: 'resolved'; project: ResolvedProject }
+  | { outcome: 'unauthorized' }
+  | { outcome: 'unavailable' };
+
+/**
+ * We could not find out whether this credential is good.
+ *
+ * 503 rather than 500 because it is specifically temporary, and with
+ * `Retry-After` because that is the difference between a client that backs off
+ * and one that hammers a platform already in trouble. Deliberately carries NO
+ * `WWW-Authenticate`: the header is an instruction to re-run OAuth, and sending
+ * it here would produce exactly the pointless browser login this distinction
+ * exists to prevent.
+ */
+function sendUnavailable(res: Response): Response {
+  return res
+    .status(503)
+    .set('Retry-After', '5')
+    .json({
+      error: 'temporarily_unavailable',
+      error_description:
+        'Could not reach the InsForge platform to check this session. Your sign-in has not been ' +
+        'invalidated — retry shortly.',
+    });
+}
+
+async function resolveProject(token: string): Promise<ProjectResolution> {
   const oauthManager = getOAuthManager();
   try {
-    return await oauthManager.resolveProjectFromToken(token);
+    const project = await oauthManager.resolveProjectFromToken(token);
+    return project ? { outcome: 'resolved', project } : { outcome: 'unauthorized' };
   } catch (error) {
-    // NOTHING here may escape, and that is the whole point of this wrapper.
+    // NOTHING here may escape as an unhandled throw — that is still the point
+    // of this wrapper, and it is why a stale bearer no longer produces a 500
+    // with a raw Express stack and no WWW-Authenticate (#95, measured on the
+    // live slug).
     //
-    // Measured on the live slug: a stale bearer — one issued before today's
-    // token format changed — reached Redis, threw MaxRetriesPerRequestError,
-    // and Express answered with a 500 and a raw stack. No WWW-Authenticate.
+    // What has changed is WHICH answer it turns into. #95 made every failure a
+    // challenge, on the argument that the client's available action is
+    // identical either way. That argument is sound for a dead credential and
+    // wrong for a platform blip: re-authorizing does not fix a platform that is
+    // down, and telling a client its sign-in is invalid throws away a working
+    // session and sends a person to a browser for nothing.
     //
-    // "Not a 500" is not the same as "a 401". The challenge header is the ONLY
-    // thing that tells an MCP client to re-run OAuth; a 500 reads as "the
-    // server is broken, give up", so a client holding an old token never
-    // recovers on its own. Iris found this, and it is not hypothetical: the
-    // token format changed three times today and every client holding an
-    // earlier one lands here, as will every existing user at the cutover.
-    //
-    // The honest cost, stated rather than hidden: a genuine infrastructure
-    // fault is now also reported as an authorization failure, which
-    // mislabels it. That is the right trade only because the client's
-    // available action is identical either way — re-authorize — and because a
-    // silent 500 gives it no action at all. The fault is logged at error level
-    // so it stays visible to us even though the client is told something
-    // softer.
-    console.error('[OAuth] Could not resolve a token; answering with a challenge:', error);
-    return null;
+    // A token that does not open never reaches here — resolveProjectFromToken
+    // returns null for that, which is 'unauthorized'. Anything that throws is
+    // by definition something we could not determine, so it is 'unavailable'
+    // and the caller answers 503 with Retry-After. The challenge stays for the
+    // case the challenge is actually the remedy.
+    console.error('[OAuth] Could not determine whether this token is valid:', error);
+    return { outcome: 'unavailable' };
   }
 }
 
@@ -800,14 +844,23 @@ app.post(OAUTH_ENDPOINTS.token, async (req: Request, res: Response) => {
         scope: 'mcp:read mcp:write',
       });
 
+      // 24 hours, not the binding's 30 days: a value that cannot be revoked
+      // directly should not live for a month. But the platform token sealed
+      // inside has its own expiry, and whichever runs out first ends the
+      // session — so advertise the real minimum rather than our ceiling.
+      //
+      // Saying a flat 24h was the "safe direction" only for us. For a client
+      // whose platform token dies in two hours it means four more of retrying a
+      // credential we already know is dead, instead of signing in again.
+      const payload = readAccessToken(accessToken, accessTokenKey());
+      const expiresIn = payload
+        ? accessTokenLifetimeSeconds(payload)
+        : ACCESS_TOKEN_TTL_SECONDS;
+
       res.json({
         access_token: accessToken,
         token_type: 'Bearer',
-        // 24 hours, not the binding's 30 days. A value that cannot be revoked
-        // directly should not live for a month, and the platform token sealed
-        // inside has its own expiry — whichever runs out first ends the
-        // session, which is the safe direction.
-        expires_in: ACCESS_TOKEN_TTL_SECONDS,
+        expires_in: expiresIn,
         scope: 'mcp:read mcp:write',
       });
     } catch (error) {
@@ -858,25 +911,77 @@ app.post(OAUTH_ENDPOINTS.revoke, async (req: Request, res: Response) => {
     });
   }
 
-  // There is no row to delete any more: the token carries its own record. What
-  // we CAN do is drop the cached project key, so the very next call re-asks the
-  // platform instead of using a key we already fetched — and the platform is
-  // where revocation is actually enforced (validateAccessToken checks
-  // `revoked` on every call).
+  // THIS ENDPOINT USED TO DO NOTHING, and returned 200 while doing it.
   //
-  // RFC 7009 §2.2 wants 200 whatever happens, including for a token we do not
-  // recognise, so that this endpoint cannot be used to probe which tokens are
-  // real. That was already the behaviour and it stays.
-  try {
-    const payload = readAccessToken(token as string, accessTokenKey());
-    if (payload) {
-      getProjectKeyCache().forgetUser(payload.userId);
-      console.log(`[OAuth] Cached project keys dropped for ${payload.userId} on revoke`);
-    }
-  } catch {
-    // Deliberately swallowed: see above.
+  // With the binding row gone, all it did was drop the cached project key. The
+  // sealed bearer still carried a live platform token, so the very next request
+  // re-fetched the key and succeeded: revoking a leaked credential forced one
+  // extra round trip and left it working for its full 24 hours. A revoke that
+  // reports success and changes nothing is worse than no revoke at all, because
+  // the person who called it stops looking for the leak.
+  //
+  // So revoke the thing that actually grants access — the platform token sealed
+  // inside. Iris confirmed the upstream endpoint is deployed and needs only our
+  // client id. The alternative considered and rejected was a local revocation
+  // marker: that is a durable per-token record consulted on every request, which
+  // is `mcp:auth:binding:` again under another name and would put back the store
+  // this whole effort removed.
+  const payload = readAccessToken(token as string, accessTokenKey());
+
+  if (!payload) {
+    // Not a token we issued, or already expired. RFC 7009 §2.2: answer 200
+    // anyway, so this endpoint cannot be used to probe which tokens are real.
+    // Nothing to revoke and nothing went wrong.
+    return res.status(200).send();
   }
-  res.status(200).send();
+
+  // Drop the cached keys first, and unconditionally. It is local, it cannot
+  // fail, and it must happen even if the upstream call below does not — a
+  // revocation that half-worked should still stop us serving a key we already
+  // hold.
+  getProjectKeyCache().forgetUser(payload.userId);
+
+  try {
+    await revokePlatformToken(payload.platformAccessToken, INSFORGE_CONFIG.clientId);
+    console.log(`[OAuth] Platform token revoked for ${payload.userId}`);
+    return res.status(200).send();
+  } catch (error) {
+    // NOT a 200. RFC 7009's blanket success is about not leaking which tokens
+    // exist; it is not licence to report a revocation that failed as one that
+    // worked. The caller is trying to shut off a credential — telling them it
+    // is off when it is still live is the same false assurance this endpoint
+    // just stopped giving, one layer down.
+    //
+    // This does mean a failure here distinguishes "was ours" from "was not",
+    // which the blanket 200 exists to hide. It only happens when the platform
+    // is already failing, it is not attacker-triggerable, and the alternative
+    // is lying about a security operation. Stated so the trade is visible
+    // rather than discovered.
+    console.error(`[OAuth] FAILED to revoke the platform token for ${payload.userId}:`, error);
+
+    // The same classification as everywhere else, because the caller's next
+    // move differs the same way: a platform that could not be reached is worth
+    // retrying, and a platform that refused our client credentials is our
+    // misconfiguration and retrying will not help.
+    if (isAuthorizationRefusal(error)) {
+      return res.status(500).json({
+        error: 'server_error',
+        error_description:
+          'This server could not authenticate itself to the platform to revoke the token. ' +
+          'The token may still be usable. This is a server misconfiguration, not something ' +
+          'retrying will fix.',
+      });
+    }
+
+    return res
+      .status(503)
+      .set('Retry-After', '5')
+      .json({
+        error: 'temporarily_unavailable',
+        error_description:
+          'The platform could not be reached to revoke this token. It may still be usable — retry.',
+      });
+  }
 });
 
 // ============================================================================
@@ -1045,7 +1150,14 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
     });
   } else if (route === 'create') {
     // New session - validate and create
-    let projectInfo = oauthToken ? await resolveProjectFromToken(oauthToken) : null;
+    let projectInfo: ResolvedProject | null = null;
+    if (oauthToken) {
+      const resolution = await resolveProject(oauthToken);
+      // A platform we could not reach is not a sign-in that has gone bad, so it
+      // must not fall through to the challenge below.
+      if (resolution.outcome === 'unavailable') return sendUnavailable(res);
+      if (resolution.outcome === 'resolved') projectInfo = resolution.project;
+    }
 
     if (!projectInfo) {
       if (!legacyApiKey && !oauthToken) {
@@ -1224,7 +1336,12 @@ app.get(SSE_ENDPOINTS.sse, async (req: Request, res: Response) => {
   const { apiKey: legacyApiKey, apiBaseUrl: legacyApiBaseUrl } = extractLegacyHeaders(req);
 
   // Resolve project info
-  let projectInfo = oauthToken ? await resolveProjectFromToken(oauthToken) : null;
+  let projectInfo: ResolvedProject | null = null;
+  if (oauthToken) {
+    const resolution = await resolveProject(oauthToken);
+    if (resolution.outcome === 'unavailable') return sendUnavailable(res);
+    if (resolution.outcome === 'resolved') projectInfo = resolution.project;
+  }
 
   if (!projectInfo) {
     if (!legacyApiKey && !oauthToken) {

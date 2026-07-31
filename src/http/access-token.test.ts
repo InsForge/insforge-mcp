@@ -4,6 +4,7 @@ import {
   issueAccessToken,
   readAccessToken,
   ACCESS_TOKEN_TTL_SECONDS,
+  accessTokenLifetimeSeconds,
   MAX_ACCESS_TOKEN_LENGTH,
   type AccessTokenPayload,
 } from './access-token.js';
@@ -128,5 +129,57 @@ describe('the access token', () => {
     // open under another, or the domain separation is decorative.
     const token = issueAccessToken(payload, key, T0);
     expect(readAccessToken(token, deriveAuthStateKey('a-test-secret'), T0)).toBeNull();
+  });
+});
+
+describe('the advertised lifetime', () => {
+  /**
+   * The PR said "24h or the platform token's expiry, whichever is sooner"; the
+   * code returned a flat 24h. When the platform token dies first, a client that
+   * believes the larger number keeps retrying a credential we already know is
+   * dead instead of signing in again.
+   */
+
+  const jwt = (claims: object) =>
+    ['eyJhbGciOiJIUzI1NiJ9', Buffer.from(JSON.stringify(claims)).toString('base64url'), 'sig'].join('.');
+
+  it('is our TTL when the platform token outlives it', () => {
+    const p = { ...payload, platformAccessToken: jwt({ exp: T0 / 1000 + 90_000 }) };
+    expect(accessTokenLifetimeSeconds(p, T0)).toBe(ACCESS_TOKEN_TTL_SECONDS);
+  });
+
+  it('is the platform token when IT expires first', () => {
+    const p = { ...payload, platformAccessToken: jwt({ exp: T0 / 1000 + 7200 }) };
+    expect(accessTokenLifetimeSeconds(p, T0)).toBe(7200);
+  });
+
+  it('never goes negative for an already-expired platform token', () => {
+    // `expires_in: -400` is not something any client is prepared to read.
+    const p = { ...payload, platformAccessToken: jwt({ exp: T0 / 1000 - 400 }) };
+    expect(accessTokenLifetimeSeconds(p, T0)).toBe(0);
+  });
+
+  it('falls back to our TTL for anything that is not a readable JWT', () => {
+    // A token we cannot parse is not evidence of anything. Opaque strings,
+    // wrong segment count, and unparseable payloads all land here.
+    for (const t of ['opaque-token', 'a.b', 'a.b.c.d', 'x.!!!not-base64-json!!!.y']) {
+      expect(accessTokenLifetimeSeconds({ ...payload, platformAccessToken: t }, T0))
+        .toBe(ACCESS_TOKEN_TTL_SECONDS);
+    }
+  });
+
+  it('falls back when the JWT has no numeric exp', () => {
+    for (const claims of [{}, { exp: 'soon' }, { exp: null }]) {
+      expect(accessTokenLifetimeSeconds({ ...payload, platformAccessToken: jwt(claims) }, T0))
+        .toBe(ACCESS_TOKEN_TTL_SECONDS);
+    }
+  });
+
+  it('does not verify the platform token, and cannot be tricked into a LONGER life', () => {
+    // We deliberately read an unverified claim. That is safe in exactly one
+    // direction: a forged exp can only shorten what we advertise, never extend
+    // it past our own ceiling.
+    const forged = { ...payload, platformAccessToken: jwt({ exp: T0 / 1000 + 10 * 365 * 86400 }) };
+    expect(accessTokenLifetimeSeconds(forged, T0)).toBe(ACCESS_TOKEN_TTL_SECONDS);
   });
 });

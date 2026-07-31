@@ -4,6 +4,7 @@ import { issueAccessToken, readAccessToken } from './access-token.js';
 import { getProjectKeyCache } from './project-key-cache.js';
 import { newStateHandle } from './auth-state-cookie.js';
 import { authStateKey, authCodeKey, accessTokenKey } from './config.js';
+import { isAuthorizationRefusal } from './error-status.js';
 import {
   validateToken,
   getProjectAccess,
@@ -374,15 +375,36 @@ export class OAuthManager {
         };
         cache.set(payload.userId, payload.projectId, key);
       } catch (error) {
-        // A refusal here is the platform saying this user may no longer reach
-        // this project. That is a 401 for the caller, not a 500 — the request
-        // is well-formed and our server is fine.
-        console.log(
-          `[OAuth] Project access refused for ${payload.userId}: ${
-            error instanceof Error ? error.message : 'unknown'
-          }`
+        // "REFUSED" AND "COULD NOT ASK" ARE DIFFERENT ANSWERS, and the first
+        // version of this collapsed them into one.
+        //
+        // A 401 or 403 is the platform saying this user may no longer reach
+        // this project: the credential is the problem, so the caller gets a
+        // 401 and re-authorizes. Anything else — a 500, a timeout, DNS, a
+        // rate limit — is us being unable to find out. Reporting that as
+        // "your sign-in is no longer valid" is a lie the client acts on: it
+        // throws away a perfectly good session and drags the user through a
+        // browser login to fix a platform hiccup that would have cleared on
+        // retry. The old binding held the key for 30 days, so a blip never
+        // signed anyone out; making the lookup per-request is what introduced
+        // this, and it needs the distinction the binding did not.
+        //
+        // Iris put the rule better than I did: 401 when the credential is the
+        // problem, 5xx when we could not tell.
+        if (isAuthorizationRefusal(error)) {
+          console.log(
+            `[OAuth] Project access refused for ${payload.userId}: ${
+              error instanceof Error ? error.message : 'unknown'
+            }`
+          );
+          return null;
+        }
+
+        console.error(
+          `[OAuth] Could not reach the platform for ${payload.userId}; this is NOT a revocation:`,
+          error
         );
-        return null;
+        throw error;
       }
     }
 

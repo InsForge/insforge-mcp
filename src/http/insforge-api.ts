@@ -189,6 +189,46 @@ export async function getProjectApiKey(token: string, projectId: string): Promis
 }
 
 /**
+ * Revoke a platform access token upstream (RFC 7009).
+ *
+ * This is what makes OUR /oauth/revoke mean something. With the token binding
+ * gone, dropping our cached project key only forces one re-fetch — the sealed
+ * bearer still carries a live platform token, so the very next request works
+ * again and the credential stays usable for its full 24 hours. A revoke that
+ * returns 200 and changes nothing is the worst kind of security control: the
+ * person who called it believes the leak is closed.
+ *
+ * So revoke the thing that actually grants access. Iris confirmed the endpoint
+ * is deployed and takes our client id with no client secret:
+ *
+ *   POST /oauth/v1/revoke  { token, token_type_hint, client_id }
+ *   our client_id      -> 200 {"success":true}
+ *   unknown client_id  -> 401 invalid_client
+ *
+ * Throws on any non-2xx, deliberately: the caller has to decide what a failed
+ * revocation means, and it must not be reported to anyone as success.
+ */
+export async function revokePlatformToken(token: string, clientId: string): Promise<void> {
+  const response = await fetch(`${INSFORGE_API_BASE}/oauth/v1/revoke`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      token,
+      token_type_hint: 'access_token',
+      client_id: clientId,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new InsforgeApiError(
+      `Failed to revoke platform token: ${errorText}`,
+      response.status
+    );
+  }
+}
+
+/**
  * Build the access host URL for a project
  * Format: https://{appkey}.{region}.insforge.app
  */
