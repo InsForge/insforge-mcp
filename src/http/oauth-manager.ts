@@ -57,6 +57,18 @@ interface AuthorizationState {
   // Our PKCE verifier for calling Insforge OAuth
   insforgeCodeVerifier: string;
 
+  /**
+   * The platform access token, present only AFTER the callback has exchanged
+   * the code for it.
+   *
+   * It used to live in its own Redis row (mcp:oauth:token:<state>) read twice
+   * by the project-selection page. Folding it into the state it was already
+   * keyed by removes the row and the second lookup — and it is safe here for
+   * exactly one reason: this envelope is encrypted, not signed. A bearer token
+   * in a signed-but-readable blob would be a bearer token in a URL.
+   */
+  platformAccessToken?: string;
+
   createdAt: number;
 }
 
@@ -103,6 +115,19 @@ function generateCode(): string {
  * OAuthManager handles the OAuth authorization flow and token-to-project binding
  */
 export class OAuthManager {
+  /**
+   * Re-seal an existing state with the platform token attached.
+   *
+   * Returns a NEW state_id: the sealed value IS the record, so adding a field
+   * necessarily produces a different string. The expiry restarts here, which
+   * matches what it replaces — the Redis token row carried its own fresh
+   * 10-minute TTL from the moment the callback wrote it, and the person still
+   * has a project to choose.
+   */
+  attachPlatformToken(authState: AuthorizationState, platformAccessToken: string): string {
+    return sealAuthState({ ...authState, platformAccessToken }, authStateKey());
+  }
+
   /**
    * Create a new authorization state (step 1 of OAuth flow)
    * Returns a state ID and the PKCE code challenge for Insforge OAuth
