@@ -8,7 +8,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 
 // Local imports
-import { getSessionManager, routeForSessionRequest } from './session-manager.js';
+import { getSessionManager, routeForSessionRequest, sessionFingerprint } from './session-manager.js';
 
 import { getOAuthManager } from './oauth-manager.js';
 import {
@@ -1138,7 +1138,7 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
   const oauthToken = extractOAuthToken(req);
   const { apiKey: legacyApiKey, apiBaseUrl: legacyApiBaseUrl } = extractLegacyHeaders(req);
 
-  console.log(`[${new Date().toISOString()}] POST ${STREAMABLE_HTTP_ENDPOINTS.mcp} - Session: ${sessionId || 'none'}, Token: ${oauthToken ? tokenFingerprint(oauthToken) : 'none'}`);
+  console.log(`[${new Date().toISOString()}] POST ${STREAMABLE_HTTP_ENDPOINTS.mcp} - Session: ${sessionFingerprint(sessionId)}, Token: ${oauthToken ? tokenFingerprint(oauthToken) : 'none'}`);
 
   let transport: StreamableHTTPServerTransport;
 
@@ -1168,7 +1168,7 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
 
   if (route === 'use-existing') {
     transport = existingRuntime!.transport;
-    console.log('[Streamable HTTP] Using existing transport for session:', sessionId);
+    console.log('[Streamable HTTP] Using existing transport for session:', sessionFingerprint(sessionId));
     sessionManager.touchSession(sessionId);
   } else if (route === 'not-found') {
     // A session id we do not hold. 404 IS THE ANSWER, and it is the one part of
@@ -1192,7 +1192,7 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
     // and re-initialize. The status is what the spec and the SDK server agree
     // on; the client's behaviour is Quinn's test, and it is the acceptance for
     // this change rather than a detail after it.
-    console.log('[Streamable HTTP] Unknown session, asking the client to start a new one:', sessionId);
+    console.log('[Streamable HTTP] Unknown session, asking the client to start a new one:', sessionFingerprint(sessionId));
     return res.status(404).json({
       error: 'Session not found',
       error_description:
@@ -1265,13 +1265,13 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
     transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => newSessionId,
       onsessioninitialized: async (initializedSessionId) => {
-        console.log(`[Streamable HTTP] Session initialized: ${initializedSessionId}`);
+        console.log(`[Streamable HTTP] Session initialized: ${sessionFingerprint(initializedSessionId)}`);
       },
     });
 
     try {
       await sessionManager.createSession(newSessionId, projectInfo, transport);
-      console.log('[Streamable HTTP] New session created:', newSessionId);
+      console.log('[Streamable HTTP] New session created:', sessionFingerprint(newSessionId));
 
       const clientInfo = extractClientInfo(req.body);
       getAnalyticsService().trackSessionCreated({
@@ -1309,7 +1309,7 @@ app.get(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
   const authHeader = req.headers['authorization'] as string;
   const sessionManager = getSessionManager();
 
-  console.log(`[${new Date().toISOString()}] GET ${STREAMABLE_HTTP_ENDPOINTS.mcp} - Session: ${sessionId || 'none'}, Auth: ${authHeader ? 'present' : 'missing'}`);
+  console.log(`[${new Date().toISOString()}] GET ${STREAMABLE_HTTP_ENDPOINTS.mcp} - Session: ${sessionFingerprint(sessionId)}, Auth: ${authHeader ? 'present' : 'missing'}`);
 
   if (!sessionId) {
     return res.status(400).json({
@@ -1343,7 +1343,7 @@ app.delete(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) =>
   const sessionId = req.headers['mcp-session-id'] as string;
   const sessionManager = getSessionManager();
 
-  console.log(`[${new Date().toISOString()}] DELETE ${STREAMABLE_HTTP_ENDPOINTS.mcp} - Session: ${sessionId || 'none'}`);
+  console.log(`[${new Date().toISOString()}] DELETE ${STREAMABLE_HTTP_ENDPOINTS.mcp} - Session: ${sessionFingerprint(sessionId)}`);
 
   if (!sessionId) {
     return res.status(400).json({
@@ -1364,7 +1364,7 @@ app.delete(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) =>
   } finally {
     // Always clean up the session, even if handleRequest throws
     await sessionManager.deleteSession(sessionId);
-    console.log(`[Streamable HTTP] Session ${sessionId} closed`);
+    console.log(`[Streamable HTTP] Session ${sessionFingerprint(sessionId)} closed`);
   }
 });
 
@@ -1433,7 +1433,7 @@ app.get(SSE_ENDPOINTS.sse, async (req: Request, res: Response) => {
   const transport = new SSEServerTransport(SSE_ENDPOINTS.messages, res);
   sseTransports.set(transport.sessionId, transport);
 
-  console.log(`[SSE] Session created: ${transport.sessionId}, Project: ${validProjectInfo.projectName}`);
+  console.log(`[SSE] Session created: ${sessionFingerprint(transport.sessionId)}, Project: ${validProjectInfo.projectName}`);
 
   // An idle SSE stream carries no bytes, so the load balancer closes it on its
   // idle timeout and the client sees the connection drop. A comment frame is
@@ -1444,21 +1444,21 @@ app.get(SSE_ENDPOINTS.sse, async (req: Request, res: Response) => {
     try {
       res.write(': keepalive\n\n');
     } catch (error) {
-      console.error(`[SSE] Keepalive write failed for ${transport.sessionId}:`, error);
+      console.error(`[SSE] Keepalive write failed for ${sessionFingerprint(transport.sessionId)}:`, error);
     }
   }, SSE_KEEPALIVE_MS);
   keepAlive.unref();
 
   // Clean up on close
   res.on('close', () => {
-    console.log(`[SSE] Session closed: ${transport.sessionId}`);
+    console.log(`[SSE] Session closed: ${sessionFingerprint(transport.sessionId)}`);
     clearInterval(keepAlive);
     sseTransports.delete(transport.sessionId);
 
     // Clean up the session from SessionManager (async with error handling)
     const sessionManager = getSessionManager();
     sessionManager.deleteSession(transport.sessionId).catch((error) => {
-      console.error(`[SSE] Failed to cleanup session ${transport.sessionId}:`, error);
+      console.error(`[SSE] Failed to cleanup session ${sessionFingerprint(transport.sessionId)}:`, error);
     });
   });
 
@@ -1475,7 +1475,7 @@ app.get(SSE_ENDPOINTS.sse, async (req: Request, res: Response) => {
       oauthTokenHash: validProjectInfo.oauthTokenHash,
     }, transport);
 
-    console.log(`[SSE] MCP server connected for session: ${transport.sessionId}`);
+    console.log(`[SSE] MCP server connected for session: ${sessionFingerprint(transport.sessionId)}`);
 
     getAnalyticsService().trackSessionCreated({
       clientName: undefined, // SSE: clientInfo not available until initialize message
@@ -1487,7 +1487,7 @@ app.get(SSE_ENDPOINTS.sse, async (req: Request, res: Response) => {
       organizationId: validProjectInfo.organizationId,
     });
   } catch (error) {
-    console.error(`[SSE] Failed to create session ${transport.sessionId}:`, error);
+    console.error(`[SSE] Failed to create session ${sessionFingerprint(transport.sessionId)}:`, error);
 
     // Clean up: remove transport from registry
     sseTransports.delete(transport.sessionId);
@@ -1496,7 +1496,7 @@ app.get(SSE_ENDPOINTS.sse, async (req: Request, res: Response) => {
     try {
       await transport.close();
     } catch (closeError) {
-      console.error(`[SSE] Error closing transport ${transport.sessionId}:`, closeError);
+      console.error(`[SSE] Error closing transport ${sessionFingerprint(transport.sessionId)}:`, closeError);
     }
 
     // Attempt to delete any partially created session (ignore errors if it wasn't created)
@@ -1523,7 +1523,7 @@ app.get(SSE_ENDPOINTS.sse, async (req: Request, res: Response) => {
 app.post(SSE_ENDPOINTS.messages, async (req: Request, res: Response) => {
   const sessionId = req.query.sessionId as string;
 
-  console.log(`[${new Date().toISOString()}] POST ${SSE_ENDPOINTS.messages} - Session: ${sessionId || 'none'}`);
+  console.log(`[${new Date().toISOString()}] POST ${SSE_ENDPOINTS.messages} - Session: ${sessionFingerprint(sessionId)}`);
 
   if (!sessionId) {
     return res.status(400).json({
@@ -1640,7 +1640,7 @@ async function startServer() {
           try {
             await transport.close();
           } catch (error) {
-            console.error(`[Shutdown] Error closing SSE transport ${sessionId}:`, error);
+            console.error(`[Shutdown] Error closing SSE transport ${sessionFingerprint(sessionId)}:`, error);
           }
         }
         sseTransports.clear();

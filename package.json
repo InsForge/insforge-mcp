@@ -23,7 +23,8 @@
     "test:coverage": "vitest run --coverage",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "verify:deploy": "node scripts/verify-deploy.mjs"
+    "verify:deploy": "node scripts/verify-deploy.mjs",
+    "verify:paths": "node scripts/verify-platform-paths.mjs"
   },
   "keywords": [
     "mcp",
