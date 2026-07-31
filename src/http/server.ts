@@ -1353,6 +1353,22 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
       };
     }
 
+    // GENERATED, NEVER TAKEN FROM THE REQUEST — and since the binding landed
+    // this line is load-bearing rather than incidental.
+    //
+    // The binding exempts `initialize` so a re-authorized client can recover.
+    // That exemption is only safe because the id created here cannot be chosen
+    // by the caller. If this ever honoured an incoming Mcp-Session-Id — to
+    // "preserve session ids across re-initialization", say — an attacker with
+    // their own perfectly valid credentials could initialize ONTO a victim's
+    // session id, overwrite the entry in the session map, and take the session
+    // over. The exemption would then hand them the exact thing the binding
+    // exists to prevent.
+    //
+    // Quinn went looking for that hole specifically and measured it closed:
+    // asked for 11111111-…, got a server-generated id, header ignored. There is
+    // a test pinning it, because "we happen to generate it" is not a property
+    // anyone would notice losing.
     const newSessionId = randomUUID();
 
     transport = new StreamableHTTPServerTransport({

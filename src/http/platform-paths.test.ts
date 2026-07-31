@@ -81,3 +81,34 @@ describe('platform URL construction', () => {
     expect(bare, 'expected only platformFetch to call fetch directly').toBe(1);
   });
 });
+
+/**
+ * A property that only became load-bearing when the binding landed.
+ *
+ * #99 exempts `initialize` from the credential check so a re-authorized client
+ * can recover. That is safe for exactly one reason: the session id created by
+ * the create path is generated, never taken from the request. If it were ever
+ * derived from the incoming `Mcp-Session-Id`, an attacker holding their own
+ * valid credentials could initialize ONTO a victim's session id, overwrite the
+ * entry in the session map and take the session over — the exemption handing
+ * them the very thing the binding prevents.
+ *
+ * Quinn measured it closed (asked for 11111111-…, got a server-generated id).
+ * This pins it, because "we happen to generate it" is not a property anyone
+ * would notice losing in review.
+ */
+describe('the create path never adopts a caller-supplied session id', () => {
+  const server = readFileSync(join(__dirname, 'server.ts'), 'utf8');
+
+  it('generates the new session id with randomUUID', () => {
+    expect(server).toMatch(/const newSessionId = randomUUID\(\);/);
+  });
+
+  it('feeds the transport that generated id and nothing from the request', () => {
+    const generators = [...server.matchAll(/sessionIdGenerator:\s*([^,\n]+)/g)].map((m) => m[1].trim());
+    // The meta-check: if this stops matching, the assertion below is vacuous.
+    expect(generators.length).toBeGreaterThanOrEqual(1);
+    // `() => sessionId` — the request's id — is the mutation this forbids.
+    expect(generators).toEqual(generators.map(() => '() => newSessionId'));
+  });
+});
