@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveRedisClientSpec, type RedisConfig } from './redis.js';
+import { resolveRedisClientSpec, isRedisConfigured, type RedisConfig } from './redis.js';
 
 /**
  * These exist because of a bug that was invisible: REDIS_PASSWORD was read into
@@ -104,5 +104,30 @@ describe('resolveRedisClientSpec — cluster', () => {
     expect(spec).toMatchObject({ nodes: [{ host: 'redis.internal', port: 6379 }] });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect((spec.options as any).redisOptions.tls).toEqual({});
+  });
+});
+
+describe('isRedisConfigured', () => {
+  // The boot ping used to be unconditional, so a container with no Redis
+  // exited 1 before app.listen and nothing was reachable — not /health, not
+  // discovery, not a log line naming the cause. This predicate is what lets
+  // the server come up and say so instead.
+  it('is true when a URL or a host is given', () => {
+    expect(isRedisConfigured({ REDIS_URL: 'redis://cache:6379' })).toBe(true);
+    expect(isRedisConfigured({ REDIS_HOST: 'cache' })).toBe(true);
+  });
+
+  it('is false when nothing points anywhere', () => {
+    expect(isRedisConfigured({})).toBe(false);
+    expect(isRedisConfigured({ REDIS_URL: '', REDIS_HOST: '' })).toBe(false);
+  });
+
+  it('does not count a port, a password or TLS as a destination', () => {
+    // getRedisConfig defaults the host to localhost, so counting any of these
+    // would mean "configured" and send us straight back to a connection that
+    // can never succeed — the failure this exists to prevent.
+    expect(isRedisConfigured({ REDIS_PORT: '6379' })).toBe(false);
+    expect(isRedisConfigured({ REDIS_PASSWORD: 'hunter2' })).toBe(false);
+    expect(isRedisConfigured({ REDIS_TLS: 'true', REDIS_CLUSTER: 'true' })).toBe(false);
   });
 });

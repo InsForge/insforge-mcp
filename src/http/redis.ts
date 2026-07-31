@@ -49,6 +49,22 @@ export function getRedisConfig(): RedisConfig {
 }
 
 /**
+ * Has anyone actually pointed us at a Redis?
+ *
+ * `getRedisConfig` defaults the host to localhost, which is a sensible default
+ * for a developer and a lie in a container — nothing is listening there, so the
+ * server retried a connection that could never succeed and exited 1 before
+ * `app.listen`. That is what 19 Manufact deploys failed on after the missing
+ * start script was fixed.
+ *
+ * REDIS_PORT is deliberately not counted: a port with no host is not a
+ * destination, and treating it as one would put us straight back to localhost.
+ */
+export function isRedisConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !!(env.REDIS_URL || env.REDIS_HOST);
+}
+
+/**
  * Resolve a config into the exact shape ioredis is constructed with.
  */
 export function resolveRedisClientSpec(config: RedisConfig): RedisClientSpec {
