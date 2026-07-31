@@ -147,6 +147,39 @@ export function clientIdSigningKey(): string {
 }
 
 // ============================================================================
+// Authorization State Key
+// ============================================================================
+
+/**
+ * The key that seals authorization state. Derived, like the client id key, and
+ * from the same secret but a DIFFERENT label.
+ *
+ * The label is the whole point: one compromised or observed value must not help
+ * against the other. Same secret, same algorithm, different label gives two keys
+ * with no computable relationship — which is what lets a public, signed client
+ * id and an encrypted, secret-bearing auth state coexist under one environment
+ * variable.
+ *
+ * 32 bytes exactly, because AES-256-GCM takes a 32-byte key and a shorter or
+ * longer one is a throw rather than a silent weakening.
+ */
+const AUTH_STATE_KEY_LABEL = 'mcp-auth-state-v1';
+
+export function deriveAuthStateKey(clientSecret: string): Buffer {
+  if (!clientSecret) {
+    throw new Error(
+      'INSFORGE_CLIENT_SECRET is required: the authorization state key is derived from it'
+    );
+  }
+  return createHmac('sha256', clientSecret).update(AUTH_STATE_KEY_LABEL).digest();
+}
+
+/** Lazy for the same reason as clientIdSigningKey. */
+export function authStateKey(): Buffer {
+  return deriveAuthStateKey(INSFORGE_CONFIG.clientSecret);
+}
+
+// ============================================================================
 // Redis Configuration
 // ============================================================================
 //

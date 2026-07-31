@@ -1,5 +1,7 @@
 import { createHash, randomBytes } from 'crypto';
 import { getRedisClient } from './redis.js';
+import { sealAuthState, openAuthState, InvalidAuthStateError } from './auth-state.js';
+import { authStateKey } from './config.js';
 import {
   validateToken,
   getProjectAccess,
@@ -76,12 +78,10 @@ interface TokenBinding {
 }
 
 // Redis key prefixes
-const AUTH_STATE_PREFIX = 'mcp:auth:state:';
 const TOKEN_BINDING_PREFIX = 'mcp:auth:binding:';
 const AUTH_CODE_PREFIX = 'mcp:auth:code:';
 
 // TTLs
-const AUTH_STATE_TTL = 10 * 60; // 10 minutes
 const AUTH_CODE_TTL = 5 * 60; // 5 minutes
 const TOKEN_BINDING_TTL = 30 * 24 * 60 * 60; // 30 days
 
@@ -121,9 +121,6 @@ export class OAuthManager {
       throw new Error(`Unsupported code_challenge_method: ${params.codeChallengeMethod}. Only S256 is supported.`);
     }
 
-    const redis = getRedisClient();
-    const stateId = generateCode();
-
     // Generate PKCE verifier for our request to Insforge
     const insforgeCodeVerifier = generateCodeVerifier();
     const insforgeCodeChallenge = generateCodeChallenge(insforgeCodeVerifier);
@@ -136,11 +133,10 @@ export class OAuthManager {
       createdAt: Date.now(),
     };
 
-    await redis.setex(
-      AUTH_STATE_PREFIX + stateId,
-      AUTH_STATE_TTL,
-      JSON.stringify(authState)
-    );
+    // The state IS the record. Nothing is written, so nothing has to be read
+    // back, expire, or be reachable from whichever instance handles the
+    // callback — the browser carries it there and only we can open it.
+    const stateId = sealAuthState(authState, authStateKey());
 
     return { stateId, insforgeCodeChallenge };
   }
@@ -149,14 +145,19 @@ export class OAuthManager {
    * Get authorization state
    */
   async getAuthorizationState(stateId: string): Promise<AuthorizationState | null> {
-    const redis = getRedisClient();
-    const data = await redis.get(AUTH_STATE_PREFIX + stateId);
-
-    if (!data) {
-      return null;
+    // Null, not a throw, because every caller already treats "no such state" as
+    // the ordinary case — a sign-in that took more than ten minutes. The reason
+    // it failed is logged rather than returned: a caller that could distinguish
+    // "expired" from "forged" would be an oracle for whoever is probing.
+    try {
+      return openAuthState<AuthorizationState>(stateId, authStateKey());
+    } catch (error) {
+      if (error instanceof InvalidAuthStateError) {
+        console.log(`[OAuth] Authorization state rejected: ${error.message}`);
+        return null;
+      }
+      throw error;
     }
-
-    return JSON.parse(data) as AuthorizationState;
   }
 
   /**
@@ -218,9 +219,15 @@ export class OAuthManager {
       })
     );
 
-    // Clean up the state
-    await redis.del(AUTH_STATE_PREFIX + stateId);
-
+    // Nothing to clean up: the state was never stored. It stops being accepted
+    // when its own expiry passes.
+    //
+    // That does mean a sealed state is replayable inside its ten minutes, where
+    // the deleted row was single-use. The bound on that is the platform: a
+    // replay re-presents an authorization code the platform has already
+    // consumed, and it refuses. So a replay reaches this method and then fails
+    // at the exchange — it cannot mint a second session. Worth stating rather
+    // than discovering, because "signed" and "single-use" are easy to conflate.
     return code;
   }
 
