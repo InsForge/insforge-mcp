@@ -149,3 +149,67 @@ describe('normaliseBaseUrl', () => {
     expect(normaliseBaseUrl('https://host/base/')).toBe('https://host/base');
   });
 });
+
+describe('no advertised URL can contain a doubled slash', () => {
+  // Quinn's ask: assert on the URLs we advertise, not on the helper that
+  // builds them. A trailing slash on MCP_SERVER_URL used to break the login
+  // in at least three separate places, at three different steps — the AS
+  // metadata, the project-selection redirect, and the authorize links in 401
+  // bodies. Per-consumer patching missed two of them.
+  const SLASHED = 'https://mcp.insforge.dev/';
+
+  /** Everything after the scheme, so `https://` itself is not a false hit. */
+  const hasDoubledSlash = (url: string) => url.replace(/^[a-z]+:\/\//, '').includes('//');
+
+  it('not in the protected-resource documents', () => {
+    for (const path of ['', '/mcp', '/sse']) {
+      const doc = protectedResourceMetadata(path, SLASHED);
+      expect(hasDoubledSlash(String(doc.resource))).toBe(false);
+      for (const as of doc.authorization_servers as string[]) {
+        expect(hasDoubledSlash(as)).toBe(false);
+      }
+    }
+  });
+
+  it('not in the metadata URL a client derives', () => {
+    for (const path of ['', '/mcp', '/sse']) {
+      expect(hasDoubledSlash(protectedResourceMetadataUrl(path, SLASHED))).toBe(false);
+    }
+  });
+
+  it('not in the WWW-Authenticate challenge', () => {
+    for (const path of ['', '/mcp', '/sse']) {
+      const challenge = buildResourceChallenge(path, SLASHED);
+      const named = challenge.match(/resource_metadata="([^"]+)"/)?.[1] ?? '';
+      expect(named).not.toBe('');
+      expect(hasDoubledSlash(named)).toBe(false);
+    }
+  });
+});
+
+describe('nothing bypasses the normalisation', () => {
+  it('only config.ts reads MCP_SERVER_URL', async () => {
+    // publicUrl is normalised where it is defined, so every consumer is safe
+    // by construction. The one way to reintroduce the bug is to read the raw
+    // environment variable somewhere else, so that is what this forbids.
+    const { readdirSync, readFileSync, statSync } = await import('node:fs');
+    const { join } = await import('node:path');
+
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) {
+          walk(full);
+          continue;
+        }
+        if (!full.endsWith('.ts') || full.endsWith('.test.ts')) continue;
+        if (full.endsWith('http/config.ts')) continue;
+        if (/process\.env\.MCP_SERVER_URL/.test(readFileSync(full, 'utf8'))) offenders.push(full);
+      }
+    };
+    walk('src');
+
+    expect(offenders).toEqual([]);
+  });
+});
