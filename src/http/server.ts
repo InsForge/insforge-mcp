@@ -637,12 +637,16 @@ app.post(OAUTH_ENDPOINTS.selectProject, async (req: Request, res: Response) => {
 
     const code = await oauthManager.createAuthorizationCode(
       sealed,
+      state_id as string,
       token,
       project_id as string
     );
 
-    // Nothing to delete: the token was never stored. It stops being usable
-    // when the sealed state it rides in expires.
+    // The record was never stored server-side, but the browser still holds the
+    // cookie. Clearing it on completion is cheap defence in depth: the sealed
+    // state is replayable inside its ten minutes, and there is no reason to
+    // leave a usable copy in the browser once the flow has finished.
+    res.clearCookie(AUTH_STATE_COOKIE, { path: '/oauth' });
 
     const redirectUrl = new URL(authState.redirectUri);
     redirectUrl.searchParams.set('code', code);

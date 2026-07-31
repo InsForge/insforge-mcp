@@ -179,14 +179,17 @@ export class OAuthManager {
   /**
    * Get authorization state
    */
-  async getAuthorizationState(sealed: string, expectedHandle?: string): Promise<AuthorizationState | null> {
+  async getAuthorizationState(sealed: string, expectedHandle: string): Promise<AuthorizationState | null> {
     // Null, not a throw, because every caller already treats "no such state" as
     // the ordinary case — a sign-in that took more than ten minutes. The reason
     // it failed is logged rather than returned: a caller that could distinguish
     // "expired" from "forged" would be an oracle for whoever is probing.
     try {
       const state = openAuthState<AuthorizationState>(sealed, authStateKey());
-      if (expectedHandle !== undefined && state.handle !== expectedHandle) {
+      // Required, not optional. An optional handle means a future caller can
+      // drop the CSRF binding with no compile error — john-bot's note, and the
+      // right fix is the signature rather than a comment asking nicely.
+      if (state.handle !== expectedHandle) {
         // The cookie is real and ours, but it belongs to a different
         // authorization than the one the platform is calling back about. That
         // is the case the state parameter exists to catch.
@@ -209,13 +212,14 @@ export class OAuthManager {
    */
   async createAuthorizationCode(
     stateId: string,
+    handle: string,
     token: string,
     projectId: string
   ): Promise<string> {
     const redis = getRedisClient();
 
     // Validate the state exists
-    const authState = await this.getAuthorizationState(stateId);
+    const authState = await this.getAuthorizationState(stateId, handle);
     if (!authState) {
       throw new Error('Invalid or expired authorization state');
     }
