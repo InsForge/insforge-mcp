@@ -65,6 +65,7 @@ describe('every browser-visible failure says what to do', () => {
     for (const error of ['invalid_client', 'invalid_request']) {
       const action = humanFormOf({ error }, MCP_URL).action as string[];
       expect(action).toEqual([
+        'codex mcp logout insforge',
         `npx add-mcp remove ${MCP_URL} -y`,
         'npx add-mcp https://mcp.insforge.dev/mcp',
       ]);
@@ -72,16 +73,32 @@ describe('every browser-visible failure says what to do', () => {
     }
   });
 
-  it('removes before adding, so it is not a no-op on an unchanged URL', () => {
+  it('clears the saved authorisation before reconnecting', () => {
     // add-mcp deep-merges under the server key and byte-preserves the rest, and
     // the key is inferred from the hostname. So on a same-hostname cutover a
     // bare `add-mcp <url>` rewrites an identical entry and changes nothing:
     // the stuck user runs it, fails identically, and opens a ticket. Removing
     // first is what makes the instruction do something — and it is correct on
     // a new hostname too, where it clears the stale entry anyway.
-    const [first, second] = reconnectCommand(MCP_URL);
-    expect(first).toContain('remove');
-    expect(second).toContain(MCP_URL);
+    // Blair ran these as a stuck user: on an unchanged hostname remove+add
+    // rebuilds the SAME mcpOAuth key and picks the dead registration back up,
+    // so the commands alone repair nothing. Clearing the client's saved
+    // authorisation is the step that works, and it comes first.
+    const [logout, remove, add] = reconnectCommand(MCP_URL);
+    expect(logout).toContain('logout');
+    expect(remove).toContain('remove');
+    expect(add).toContain(MCP_URL);
+  });
+
+  it('does not promise the reconnect alone will work', () => {
+    // The page used to say "add it back ... and this will complete normally".
+    // On an unchanged hostname that promise is false for Claude Code, and it
+    // was aimed at exactly the people it would fail.
+    for (const error of ['invalid_client', 'invalid_request']) {
+      const { message } = humanFormOf({ error }, MCP_URL);
+      expect(message).not.toContain('complete normally');
+      expect(message).toMatch(/Clear authentication/);
+    }
   });
 
   it('names the host the person is actually talking to, in BOTH commands', () => {
@@ -95,12 +112,15 @@ describe('every browser-visible failure says what to do', () => {
     // so passing the URL is exact on every host.
     const slug = 'https://keen-pulse-fsjr9.run.mcp-use.com/mcp';
     expect(reconnectCommand(slug)).toEqual([
+      'codex mcp logout insforge',
       `npx add-mcp remove ${slug} -y`,
       `npx add-mcp ${slug}`,
     ]);
-    for (const command of reconnectCommand(slug)) {
+    // The two add-mcp commands are host-derived; the codex one names the
+    // server as that client stored it, which is our product name on any host.
+    for (const command of reconnectCommand(slug).slice(1)) {
       expect(command).toContain('keen-pulse-fsjr9');
-      expect(command).not.toContain('insforge');
+      expect(command).not.toContain('insforge.dev');
     }
   });
 
