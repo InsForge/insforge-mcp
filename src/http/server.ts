@@ -8,9 +8,9 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 
 // Local imports
-import { getSessionManager, routeForSessionRequest, sessionFingerprint } from './session-manager.js';
+import { getSessionManager, routeForSessionRequest, sessionAcceptsCredential, sessionFingerprint } from './session-manager.js';
 
-import { getOAuthManager } from './oauth-manager.js';
+import { getOAuthManager, hashToken } from './oauth-manager.js';
 import {
   SERVER_CONFIG,
   INSFORGE_CONFIG,
@@ -228,6 +228,74 @@ function extractOAuthToken(req: Request): string | undefined {
     return authHeader.substring(7);
   }
   return undefined;
+}
+
+/**
+ * Refuse a request that names a session it was not the one to open.
+ *
+ * ONE FUNCTION, CALLED BY EVERY VERB, and that is the whole point of its
+ * existing at all. The first version of this bound POST only — and a session is
+ * reachable by three verbs, so it was a POST-shaped fix for a session-shaped
+ * problem. Quinn demonstrated the gap rather than argued it:
+ *
+ *   DELETE /mcp with just the session id      -> 200
+ *   the victim's very next valid request      -> 404
+ *
+ * One request, no credential of any kind, and someone else is logged out. GET
+ * is quieter and worse: it opens the server->client stream on the id alone and
+ * receives everything pushed for that session, with no forged requests at all.
+ *
+ * Returns true when it has already answered, so a caller is one line:
+ *
+ *   if (refuseMismatchedCredential(req, res, sessionId)) return;
+ *
+ * Placement matters and is not interchangeable: call it only AFTER the handler
+ * has established that this process holds the session. Before that, it would
+ * authenticate ahead of routing and a client with a dead session plus a stale
+ * token would get 401 where it needs the 404 that tells it to start over.
+ */
+function credentialMatchesSession(req: Request, sessionId: string): boolean {
+  const stored = getSessionManager().getSessionData(sessionId)?.oauthTokenHash;
+  const presentedToken = extractOAuthToken(req);
+  // The FULL sha256, never tokenFingerprint's 8 chars — see
+  // sessionAcceptsCredential for why that mistake logs everyone out.
+  const presented = presentedToken ? hashToken(presentedToken) : undefined;
+  return sessionAcceptsCredential(stored, presented);
+}
+
+function refuseMismatchedCredential(req: Request, res: Response, sessionId: string): boolean {
+  if (credentialMatchesSession(req, sessionId)) return false;
+
+  console.log(
+    `[Streamable HTTP] Session ${sessionFingerprint(sessionId)} refused: ` +
+      'credential does not match the one it was opened with'
+  );
+
+  // 404, NOT 401, and this is the one decision here I got wrong first.
+  //
+  // 401 is the instruction "re-run OAuth". Consider the client that just did:
+  // it re-authorized, holds a NEW token, and retries with the session id it
+  // still has. The credential is valid and the session is real — but they
+  // belong to different sign-ins, so a 401 sends it round the OAuth loop again,
+  // to arrive with another new token and the same old id. That is an infinite
+  // loop triggered by the ordinary act of signing in again, and I only saw it
+  // because I tested the re-authorize case rather than only the attacker.
+  //
+  // The action this client actually needs is the one the routing 404 already
+  // gives: start a new session. So the answer is identical to "we do not hold
+  // that session" — which it effectively is, for you — and the recovery is
+  // coherent: ANY request naming a session this process will not serve you gets
+  // 404 and initializes again.
+  //
+  // It also happens to leak less. To someone probing with a stolen id, "not
+  // found" and "not yours" are now the same answer.
+  res.status(404).json({
+    error: 'Session not found',
+    error_description:
+      'This session is not held by the server — it expired, or the server restarted. ' +
+      'Send an initialize request to start a new one.',
+  });
+  return true;
 }
 
 /**
@@ -1160,13 +1228,38 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
   // bearer credential in its own right. That is unchanged by this file's
   // history — master does the same — and it is why the id is randomUUID() and
   // never derived from anything guessable.
-  const route = routeForSessionRequest({
+  const isInitialize = isInitializeRequest(req.body);
+  let route = routeForSessionRequest({
     hasRuntime: existingRuntime !== null,
     sessionId,
-    isInitialize: isInitializeRequest(req.body),
+    isInitialize,
   });
 
+  // THE BINDING REFUSES USE OF A SESSION, NEVER CREATION OF ONE, and this line
+  // is here because the first version got that wrong in a way tests missed.
+  //
+  // Routing prefers a session we hold, so a re-authorized client sending
+  // `initialize` while its OLD session is still alive routes to 'use-existing'.
+  // Its new token does not match, so it was refused — and `initialize` is
+  // precisely the request that repairs the situation, so it was refused
+  // forever, for as long as the stale session lived. A loop with a 24-hour
+  // exit, caused by signing in again.
+  //
+  // My test for the escape hatch asserted `hasRuntime: false` and passed
+  // happily while the live-session case failed. It only showed up by driving a
+  // real re-authorization end to end.
+  //
+  // Falling through to 'create' rather than reusing the session is the correct
+  // half too: a different credential may be a different user or project, so
+  // handing it the old session's project binding would be worse than refusing.
+  if (route === 'use-existing' && isInitialize && !credentialMatchesSession(req, sessionId)) {
+    route = 'create';
+  }
+
   if (route === 'use-existing') {
+    // A session we hold, so the 404 is already decided above and untouched.
+    if (refuseMismatchedCredential(req, res, sessionId)) return;
+
     transport = existingRuntime!.transport;
     console.log('[Streamable HTTP] Using existing transport for session:', sessionFingerprint(sessionId));
     sessionManager.touchSession(sessionId);
@@ -1260,6 +1353,22 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
       };
     }
 
+    // GENERATED, NEVER TAKEN FROM THE REQUEST — and since the binding landed
+    // this line is load-bearing rather than incidental.
+    //
+    // The binding exempts `initialize` so a re-authorized client can recover.
+    // That exemption is only safe because the id created here cannot be chosen
+    // by the caller. If this ever honoured an incoming Mcp-Session-Id — to
+    // "preserve session ids across re-initialization", say — an attacker with
+    // their own perfectly valid credentials could initialize ONTO a victim's
+    // session id, overwrite the entry in the session map, and take the session
+    // over. The exemption would then hand them the exact thing the binding
+    // exists to prevent.
+    //
+    // Quinn went looking for that hole specifically and measured it closed:
+    // asked for 11111111-…, got a server-generated id, header ignored. There is
+    // a test pinning it, because "we happen to generate it" is not a property
+    // anyone would notice losing.
     const newSessionId = randomUUID();
 
     transport = new StreamableHTTPServerTransport({
@@ -1326,6 +1435,10 @@ app.get(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
     });
   }
 
+  // The stream is the quietest way to use a stolen id — it opens on the id
+  // alone and then just receives. Bound here, after the 404 above.
+  if (refuseMismatchedCredential(req, res, sessionId)) return;
+
   // This stream is the only sign of life for a client that opens it and then
   // sends nothing. Hold the session for as long as it is open, and start the
   // idle clock now rather than from whenever the last POST arrived.
@@ -1358,6 +1471,10 @@ app.delete(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) =>
       error: 'Session not found.',
     });
   }
+
+  // Destroying someone else's session is a one-request denial of service on
+  // the id alone. Bound here, after the 404 above.
+  if (refuseMismatchedCredential(req, res, sessionId)) return;
 
   try {
     await runtime.transport.handleRequest(req, res, req.body);

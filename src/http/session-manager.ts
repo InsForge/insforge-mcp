@@ -168,6 +168,58 @@ export interface SweepCandidate {
  * stays frozen at the moment the stream opened while the client is plainly
  * still connected.
  */
+/**
+ * May this request use this session?
+ *
+ * A session id alone is enough to be routed to a live session: routing decides
+ * before any credential is read, deliberately, so that a dead id gets its 404
+ * without a login. The consequence is that `Mcp-Session-Id` is a bearer
+ * credential — it yields the stored project key and full tool access — and one
+ * leaked id is read and write on someone else's project. Fingerprinting the id
+ * out of the logs stops us writing it down; this stops a copy that escaped
+ * anyway from being used.
+ *
+ * Deliberately NOT a second authentication. It asks one question: was this
+ * session opened with an OAuth token, and is the caller presenting the same
+ * one? A session with nothing to bind to is accepted unchanged —
+ *
+ *   'legacy'  an x-api-key session. Its credential is the header it re-sends on
+ *             every request; there is no token to compare.
+ *   ''        an SSE path that stores no hash.
+ *
+ * Rejecting those would log out every legacy client the moment this deploys,
+ * which is why the question is "was something bound" rather than "the hashes
+ * must match".
+ *
+ * SAFE AGAINST A MID-SESSION LOGOUT, and that is measured rather than hoped:
+ * the SDK's `_commonHeaders()` sets `Authorization` and `mcp-session-id` in one
+ * place, and all three request paths use it (`send`, `_startOrAuthSse`,
+ * `terminateSession`). Driven against a real client, every POST carried the
+ * token — initialize, the initialized notification, and each tools/list — so a
+ * client that had a token on request one still has it on request two.
+ *
+ * BOTH HASHES MUST BE THE FULL-LENGTH FORM. `SessionData.oauthTokenHash` is a
+ * 64-character sha256 from oauth-manager's `hashToken`; server.ts also has a
+ * `tokenFingerprint` that is the FIRST 8 CHARACTERS, for logs. Comparing one
+ * against the other rejects every OAuth session on its second request — a
+ * mid-session logout for everyone, arriving through the door this function
+ * exists to keep shut. Quinn hit exactly that writing the first version.
+ *
+ * The caller must apply this INSIDE the branch that has already found a live
+ * session. Applied before routing it would authenticate first, and a client
+ * with a dead session plus a stale token would get 401 where it needs the 404
+ * that tells it to start over.
+ */
+export function sessionAcceptsCredential(
+  storedTokenHash: string | undefined,
+  presentedTokenHash: string | undefined
+): boolean {
+  // Nothing was bound at creation: an x-api-key session, or a path that stores
+  // no hash. Unchanged behaviour for those, on purpose.
+  if (!storedTokenHash || storedTokenHash === 'legacy') return true;
+  return presentedTokenHash === storedTokenHash;
+}
+
 export function selectOrphanedSessions(
   sessions: SweepCandidate[],
   now: number = monotonicNow()
