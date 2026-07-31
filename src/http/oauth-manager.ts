@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'crypto';
 import { getRedisClient } from './redis.js';
 import { sealAuthState, openAuthState, InvalidAuthStateError } from './auth-state.js';
+import { newStateHandle } from './auth-state-cookie.js';
 import { authStateKey } from './config.js';
 import {
   validateToken,
@@ -46,8 +47,19 @@ export function generateState(): string {
  * 2. The PKCE verifier we generate when calling Insforge OAuth
  */
 interface AuthorizationState {
-  // Original MCP client request
-  clientId: string;
+  /**
+   * Ties the sealed cookie to the `state` parameter the platform echoes back.
+   * The callback requires them to match; without that the cookie alone would
+   * authorise any callback that arrived carrying one.
+   */
+  handle: string;
+
+  // Original MCP client request.
+  //
+  // clientId is deliberately NOT here. Nothing read it after authorize, and it
+  // is the largest field by far — a signed client id is ~171 characters and may
+  // be up to 4096, which is what pushed the sealed envelope past a 4096-byte
+  // cookie.
   redirectUri: string;
   scope: string;
   state?: string;
@@ -133,13 +145,12 @@ export class OAuthManager {
    * Returns a state ID and the PKCE code challenge for Insforge OAuth
    */
   async createAuthorizationState(params: {
-    clientId: string;
     redirectUri: string;
     scope: string;
     state?: string;
     codeChallenge?: string;
     codeChallengeMethod?: string;
-  }): Promise<{ stateId: string; insforgeCodeChallenge: string }> {
+  }): Promise<{ handle: string; sealedState: string; insforgeCodeChallenge: string }> {
     // Validate code_challenge_method early - only S256 is supported
     // Reject 'plain' and other methods to prevent downgrade attacks
     if (params.codeChallenge && params.codeChallengeMethod && params.codeChallengeMethod !== 'S256') {
@@ -151,31 +162,41 @@ export class OAuthManager {
     const insforgeCodeChallenge = generateCodeChallenge(insforgeCodeVerifier);
 
     // Normalize codeChallengeMethod to S256 if code challenge is provided
+    const handle = newStateHandle();
     const authState: AuthorizationState = {
       ...params,
+      handle,
       codeChallengeMethod: params.codeChallenge ? 'S256' : undefined,
       insforgeCodeVerifier,
       createdAt: Date.now(),
     };
 
-    // The state IS the record. Nothing is written, so nothing has to be read
-    // back, expire, or be reachable from whichever instance handles the
-    // callback — the browser carries it there and only we can open it.
-    const stateId = sealAuthState(authState, authStateKey());
-
-    return { stateId, insforgeCodeChallenge };
+    // The handle goes to the platform (32 chars, comfortably inside its
+    // 255-character column); the sealed record goes in a cookie on our origin.
+    return { handle, sealedState: sealAuthState(authState, authStateKey()), insforgeCodeChallenge };
   }
 
   /**
    * Get authorization state
    */
-  async getAuthorizationState(stateId: string): Promise<AuthorizationState | null> {
+  async getAuthorizationState(sealed: string, expectedHandle: string): Promise<AuthorizationState | null> {
     // Null, not a throw, because every caller already treats "no such state" as
     // the ordinary case — a sign-in that took more than ten minutes. The reason
     // it failed is logged rather than returned: a caller that could distinguish
     // "expired" from "forged" would be an oracle for whoever is probing.
     try {
-      return openAuthState<AuthorizationState>(stateId, authStateKey());
+      const state = openAuthState<AuthorizationState>(sealed, authStateKey());
+      // Required, not optional. An optional handle means a future caller can
+      // drop the CSRF binding with no compile error — john-bot's note, and the
+      // right fix is the signature rather than a comment asking nicely.
+      if (state.handle !== expectedHandle) {
+        // The cookie is real and ours, but it belongs to a different
+        // authorization than the one the platform is calling back about. That
+        // is the case the state parameter exists to catch.
+        console.log('[OAuth] Authorization state handle does not match the state parameter');
+        return null;
+      }
+      return state;
     } catch (error) {
       if (error instanceof InvalidAuthStateError) {
         console.log(`[OAuth] Authorization state rejected: ${error.message}`);
@@ -191,13 +212,14 @@ export class OAuthManager {
    */
   async createAuthorizationCode(
     stateId: string,
+    handle: string,
     token: string,
     projectId: string
   ): Promise<string> {
     const redis = getRedisClient();
 
     // Validate the state exists
-    const authState = await this.getAuthorizationState(stateId);
+    const authState = await this.getAuthorizationState(stateId, handle);
     if (!authState) {
       throw new Error('Invalid or expired authorization state');
     }
