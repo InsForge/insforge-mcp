@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import { randomUUID, createHash } from 'crypto';
 import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
 import v8 from 'node:v8';
 
 // Transport imports
@@ -2026,10 +2027,26 @@ async function startServer() {
  * string — `import.meta.url` is a file: URL and argv[1] is a path, and
  * comparing them directly is a bug that only shows up on the platform whose
  * separator differs.
+ *
+ * And through realpathSync, which is the part I got wrong first: package.json
+ * publishes this file as the `insforge-mcp-server` bin, npm installs bins as
+ * SYMLINKS, and Node resolves symlinks for `import.meta.url` but not for
+ * argv[1]. So the naive comparison was false when launched by its own installed
+ * name, and the server silently did not start — no error, no log, nothing to
+ * grep for. The container was safe because its start script names the file
+ * directly, which is exactly why testing only that form proved nothing about
+ * the published binary.
  */
-const isEntryPoint = process.argv[1]
-  ? import.meta.url === pathToFileURL(process.argv[1]).href
-  : false;
+const entryPath = process.argv[1];
+let isEntryPoint = false;
+if (entryPath) {
+  try {
+    isEntryPoint = import.meta.url === pathToFileURL(realpathSync(entryPath)).href;
+  } catch {
+    // argv[1] naming something unresolvable is not a reason to refuse to boot.
+    isEntryPoint = import.meta.url === pathToFileURL(entryPath).href;
+  }
+}
 
 if (isEntryPoint) {
   startServer();
