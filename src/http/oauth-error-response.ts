@@ -266,6 +266,21 @@ export const PKCE_REQUIRED_PAGE: HumanForm = {
  * would be least likely to assert.
  */
 export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
+  // The type says string. The VALUE comes from `req.query`, where a repeated
+  // parameter is parsed as an array — `?error_description=a&error_description=b`
+  // arrives as `['a','b']`, and the callback forwards it with a cast, which is a
+  // claim rather than a conversion. So `.trim()` threw a TypeError and express
+  // rendered its own stack trace, with file paths, to the person the page exists
+  // to help. Anyone can craft that URL.
+  //
+  // Normalised here rather than at the callback because this helper is what
+  // every browser-visible error goes through — fixing the one caller that
+  // happens to be reachable today is the mistake this file was written to stop.
+  // Anything that is not a string is treated as absent, so the generic page is
+  // what a hostile query gets.
+  const description =
+    typeof body.error_description === 'string' ? body.error_description : undefined;
+
   switch (body.error) {
     case 'invalid_client':
       return {
@@ -364,7 +379,7 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
       // `?error=x&error_description=%20` on the callback.
       return {
         heading: 'Sign-in could not be completed',
-        message: `${endsSentence(body.error_description?.trim() || 'The sign-in did not complete.')} Start it again from your editor or client.`,
+        message: `${endsSentence(description?.trim() || 'The sign-in did not complete.')} Start it again from your editor or client.`,
       };
   }
 }

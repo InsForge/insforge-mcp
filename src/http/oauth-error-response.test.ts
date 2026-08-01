@@ -206,6 +206,28 @@ describe('every browser-visible failure says what to do', () => {
     expect(humanFormOf({ error: 'invalid_request' }, MCP_URL).message).toMatch(/different port/);
   });
 
+  it.each([
+    ['a repeated query parameter', ['a', 'b']],
+    ['a single repeated value', ['only']],
+    ['a number', 42],
+    ['an object', { nested: true }],
+    ['null', null],
+  ])('survives %s where a string was declared', (_label, error_description) => {
+    // The TYPE says string; the VALUE comes from req.query, where a repeated
+    // parameter is an array and the callback forwards it with a cast. So
+    // `?error=x&error_description=a&error_description=b` reached `.trim()` and
+    // threw — express then rendered its own stack trace, file paths and all, to
+    // the person this page exists to help. Anyone could craft that URL.
+    const body = { error: 'weird_new_code', error_description } as unknown as {
+      error: string;
+      error_description?: string;
+    };
+    expect(() => humanFormOf(body, MCP_URL)).not.toThrow();
+    const { message } = humanFormOf(body, MCP_URL);
+    // Falls through to the generic sentence rather than rendering the junk.
+    expect(message).toMatch(/^The sign-in did not complete\./);
+  });
+
   it('treats a blank description as no description', () => {
     // A present-but-blank `error_description` is truthy, so it used to skip the
     // fallback and render ". In Claude Code: ..." — a sentence opening with a
