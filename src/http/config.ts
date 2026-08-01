@@ -221,6 +221,32 @@ export function accessTokenKey(): Buffer {
   return deriveAccessTokenKey(INSFORGE_CONFIG.clientSecret);
 }
 
+/**
+ * And a fifth, for the refresh token.
+ *
+ * Fifth purpose, fifth label. It seals a credential that outlives the access
+ * token by thirty times, so it is the one whose key most needs to be unrelated
+ * to the others: a refresh token is what an attacker would rather have.
+ *
+ * Note for whoever counts these next: rotating INSFORGE_CLIENT_SECRET now
+ * invalidates FIVE things rather than four, and the refresh token is the one
+ * that makes that rotation user-visible for longer — an access token dies in an
+ * hour anyway, but a refresh token someone was relying on for a month dies with
+ * the rotation and sends them back through a browser.
+ */
+const REFRESH_TOKEN_KEY_LABEL = 'mcp-refresh-token-v1';
+
+export function deriveRefreshTokenKey(clientSecret: string): Buffer {
+  if (!clientSecret) {
+    throw new Error('INSFORGE_CLIENT_SECRET is required: the refresh token key is derived from it');
+  }
+  return createHmac('sha256', clientSecret).update(REFRESH_TOKEN_KEY_LABEL).digest();
+}
+
+export function refreshTokenKey(): Buffer {
+  return deriveRefreshTokenKey(INSFORGE_CONFIG.clientSecret);
+}
+
 // ============================================================================
 // Redis Configuration
 // ============================================================================
