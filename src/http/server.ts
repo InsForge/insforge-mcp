@@ -403,6 +403,17 @@ app.get(OAUTH_ENDPOINTS.protectedResource, (_req: Request, res: Response) => {
 /**
  * OAuth Dynamic Client Registration (RFC 7591)
  */
+/**
+ * A registration metadata field the client may send as an array, or not at all,
+ * or as something else entirely — it is request body, so it is not typed.
+ * Anything that is not an array of strings is treated as absent, which lands on
+ * the defaults below rather than on a 400: the goal is to refuse values we
+ * cannot honour, not to police shapes the caller never meant to send.
+ */
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+}
+
 app.post(OAUTH_ENDPOINTS.register, (req: Request, res: Response) => {
   const {
     client_name,
@@ -414,6 +425,38 @@ app.post(OAUTH_ENDPOINTS.register, (req: Request, res: Response) => {
   } = req.body;
 
   const clientName = typeof client_name === 'string' && client_name ? client_name : 'MCP Client';
+
+  // #104: the response used to echo `grant_types` and `response_types` straight
+  // back, so a client that asked for `password` or a device code was TOLD YES at
+  // registration and refused at the token endpoint. A registration response is
+  // the server asserting what it will honour, and a client is entitled to plan
+  // against it.
+  //
+  // Rejected here rather than narrowed silently, for the reason this file keeps
+  // arriving at: refuse where the caller is listening. A client that asked for a
+  // grant it needs should find out now, from a message naming what it can have,
+  // rather than at the first token request in front of a user.
+  const unsupportedGrants = asStringArray(grant_types).filter(
+    (value) => !(OAUTH_CONFIG.grantTypes as readonly string[]).includes(value)
+  );
+  if (unsupportedGrants.length > 0) {
+    return res.status(400).json({
+      error: 'invalid_client_metadata',
+      error_description:
+        `grant_types contains values this server does not support: ${unsupportedGrants.join(', ')}. ` +
+        `Supported: ${OAUTH_CONFIG.grantTypes.join(', ')}.`,
+    });
+  }
+
+  const unsupportedResponses = asStringArray(response_types).filter((value) => value !== 'code');
+  if (unsupportedResponses.length > 0) {
+    return res.status(400).json({
+      error: 'invalid_client_metadata',
+      error_description:
+        `response_types contains values this server does not support: ${unsupportedResponses.join(', ')}. ` +
+        'Supported: code.',
+    });
+  }
 
   // The registration is carried by the id itself, so nothing is written here.
   // mintClientId validates redirect_uris — count, absoluteness, scheme, and
