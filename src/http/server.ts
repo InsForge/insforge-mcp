@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import { randomUUID, createHash } from 'crypto';
+import { pathToFileURL } from 'node:url';
 import v8 from 'node:v8';
 
 // Transport imports
@@ -57,7 +58,7 @@ import { PACKAGE_VERSION } from '../shared/version.js';
 // Express App Setup
 // ============================================================================
 
-const app = express();
+export const app = express();
 
 // Trust proxy headers (X-Forwarded-Proto, X-Forwarded-For, etc.)
 // Required for correct protocol detection behind reverse proxies (nginx, AWS ALB, etc.)
@@ -2012,4 +2013,24 @@ async function startServer() {
   }
 }
 
-startServer();
+/**
+ * Start only when this module IS the process entry point.
+ *
+ * Without the guard, importing this file to reach `app` binds the configured
+ * port as a side effect, which is why the route branches had no tests: there was
+ * no way to drive a handler without standing up a real server on a real port.
+ * Two credential guards shipped untested for exactly that reason, and QA proved
+ * it by disabling each in turn and watching the suite stay green.
+ *
+ * Compared against argv[1] through pathToFileURL so the two are the same KIND of
+ * string — `import.meta.url` is a file: URL and argv[1] is a path, and
+ * comparing them directly is a bug that only shows up on the platform whose
+ * separator differs.
+ */
+const isEntryPoint = process.argv[1]
+  ? import.meta.url === pathToFileURL(process.argv[1]).href
+  : false;
+
+if (isEntryPoint) {
+  startServer();
+}
