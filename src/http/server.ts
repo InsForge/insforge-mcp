@@ -988,7 +988,7 @@ app.post(OAUTH_ENDPOINTS.token, async (req: Request, res: Response) => {
 
     try {
       const oauthManager = getOAuthManager();
-      const { accessToken } = await oauthManager.exchangeCode(
+      const { accessToken, refreshToken } = await oauthManager.exchangeCode(
         code as string,
         redirect_uri as string,
         code_verifier as string | undefined
@@ -1012,10 +1012,20 @@ app.post(OAUTH_ENDPOINTS.token, async (req: Request, res: Response) => {
         ? accessTokenLifetimeSeconds(payload)
         : ACCESS_TOKEN_TTL_SECONDS;
 
+      // refresh_token is spread in rather than always present: a code minted
+      // before this shipped carries none, and `refresh_token: undefined` would
+      // serialise the key away anyway — but stating the conditional makes the
+      // absence deliberate rather than incidental. Quinn caught this being
+      // MINTED AND DROPPED one line above: exchangeCode returned it, the
+      // destructure ignored it, and the response omitted it, so discovery
+      // advertised a grant no client could ever obtain the credential for.
+      // Nothing was type-wrong about discarding a returned field, which is why
+      // only a real login found it.
       res.json({
         access_token: accessToken,
         token_type: 'Bearer',
         expires_in: expiresIn,
+        ...(refreshToken ? { refresh_token: refreshToken } : {}),
         scope: 'mcp:read mcp:write',
       });
     } catch (error) {
