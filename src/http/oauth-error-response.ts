@@ -199,6 +199,21 @@ const CLEARING_INSTRUCTION =
   'directory where you use InsForge — one of them only looks there.';
 
 /**
+ * Terminate a sentence we did not write before another one follows it.
+ *
+ * The only text this is ever applied to is the platform's forwarded
+ * `error_description`, which is outside our control and carries no punctuation
+ * guarantee — "The user denied the request" is a real one. Joined with a bare
+ * space it runs straight into the next sentence: "...denied the request In
+ * Claude Code: run /mcp". Our own literal fallbacks end in a full stop, which
+ * is exactly why the seam was invisible until Blair read the rendered copy.
+ */
+function endsSentence(text: string): string {
+  const trimmed = text.trim();
+  return /[.!?:;]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+/**
  * What to tell a person, given the machine-readable error.
  *
  * Pure and exported so the wording is testable without standing up express —
@@ -241,6 +256,26 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
           'the details below are what support will ask for.',
       };
 
+    case 'access_denied':
+      // Nothing is stale here — they cancelled. Clearing the authorisation
+      // would destroy a registration that works and land them back on the same
+      // consent screen, so this branch exists to keep the repair instruction
+      // away from the one code we know does not need it.
+      //
+      // Reachable on exactly one path, and the flip makes it likelier rather
+      // than rarer: /oauth/callback bounces a platform error back to the
+      // client's own redirect_uri when it can open the auth state, and only
+      // renders this page when it cannot (server.ts). A cancel whose state
+      // cookie is missing or host-scoped to the other hostname is precisely
+      // what a cutover window produces.
+      //
+      // Copy is Blair's, who caught that the default branch was pinning the
+      // wrong remedy here.
+      return {
+        heading: 'You cancelled this sign-in',
+        message: 'You cancelled the sign-in. Start it again and approve to continue.',
+      };
+
     default:
       // The branch #101 did not reach, still telling people to remove the
       // server and add it back — the one remedy this file had already measured
@@ -255,7 +290,7 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
       // longer arrives without the step that makes the commands beneath it work.
       return {
         heading: 'Sign-in could not be completed',
-        message: `${body.error_description || 'The sign-in did not complete.'} ${CLEARING_INSTRUCTION}`,
+        message: `${endsSentence(body.error_description || 'The sign-in did not complete.')} ${CLEARING_INSTRUCTION}`,
         action: reconnectCommand(mcpUrl),
       };
   }

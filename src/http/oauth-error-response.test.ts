@@ -119,12 +119,16 @@ describe('every browser-visible failure says what to do', () => {
   // and `npx add-mcp remove` writes a different file entirely, so commands
   // printed without the menu step leave the user in the loop the page exists
   // to end.
+  // The table is codes whose remedy IS clearing. `access_denied` was in it and
+  // should never have been: nothing is stale when someone cancels, so asserting
+  // /Clear authentication/ over it did not merely allow the wrong advice, it
+  // required it. That is this same bug pointed the other way — a test naming one
+  // remedy stops distinguishing the cases where that remedy is not the remedy.
+  // Blair caught it against the rendered page.
   it.each([
     ['invalid_client', undefined],
     ['invalid_request', undefined],
     ['unsupported_response_type', 'Only response_type=code is supported'],
-    ['access_denied', undefined],
-    ['access_denied', 'The user denied the request'],
     ['token_exchange_failed', undefined],
     ['weird_new_code', undefined],
     ['weird_new_code', 'the disk melted'],
@@ -142,6 +146,37 @@ describe('every browser-visible failure says what to do', () => {
     // phrasing — it was selling remove-and-re-add as the remedy, which reads as
     // the friendlier instruction in any wording someone reaches for next.
     expect(message).not.toMatch(/add(ing)? it back/i);
+  });
+
+  // And the other half of the same property: a code whose remedy is NOT
+  // clearing must not be handed the clearing instruction. Without this the two
+  // tables are just a list and nothing stops `access_denied` drifting back into
+  // the default branch, which is how it got the wrong advice in the first place.
+  it.each([
+    ['server_error', undefined],
+    ['access_denied', undefined],
+    ['access_denied', 'The user denied the request'],
+  ])('%s (description: %s) is not told to clear a registration that works', (error, error_description) => {
+    const { message, action } = humanFormOf({ error, error_description }, MCP_URL);
+    expect(action).toBeUndefined();
+    expect(message).not.toMatch(/Clear authentication/);
+    expect(message).not.toMatch(/add(ing)? it back/i);
+  });
+
+  it('does not run the platform\'s sentence into ours', () => {
+    // The forwarded description is not ours and carries no punctuation
+    // guarantee. Joined with a bare space, "The user denied the request" ran
+    // straight into "In Claude Code: run /mcp" as one sentence. Our own literal
+    // fallbacks all end in a full stop, so nothing in the fixtures showed it.
+    const { message } = humanFormOf(
+      { error: 'weird_new_code', error_description: 'the platform said no' },
+      MCP_URL
+    );
+    expect(message).toContain('the platform said no. In Claude Code');
+    // A description that already punctuates itself is not given a second stop.
+    expect(
+      humanFormOf({ error: 'weird_new_code', error_description: 'it broke.' }, MCP_URL).message
+    ).toContain('it broke. In Claude Code');
   });
 
   it('names the host the person is actually talking to, in BOTH commands', () => {
