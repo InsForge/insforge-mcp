@@ -130,10 +130,18 @@ describe('every browser-visible failure says what to do', () => {
     ['weird_new_code', 'the disk melted'],
   ])('%s (description: %s) never prints the commands without the step that makes them work', (error, error_description) => {
     const { message, action } = humanFormOf({ error, error_description }, MCP_URL);
-    if (!action) return; // server_error offers no commands, so it needs no clearing step
+    // Asserted, not guarded. This read `if (!action) return` — meant for
+    // server_error, which is not in this table and so never reached it. What it
+    // would actually have done is let a branch that silently LOST its commands
+    // pass the test written to protect them: exactly the it-cannot-fail shape
+    // that let the default branch drift in the first place. Caught in review by
+    // john-bot and coderabbit independently.
+    expect(action).toBeDefined();
     expect(message).toMatch(/Clear authentication/);
-    // And it must not recommend the substitute that repairs nothing.
-    expect(message).not.toMatch(/adding it back is the usual remedy/);
+    // Broader than the one sentence that was removed. The defect was never that
+    // phrasing — it was selling remove-and-re-add as the remedy, which reads as
+    // the friendlier instruction in any wording someone reaches for next.
+    expect(message).not.toMatch(/add(ing)? it back/i);
   });
 
   it('names the host the person is actually talking to, in BOTH commands', () => {
@@ -185,7 +193,11 @@ describe('every browser-visible failure says what to do', () => {
   });
 
   it('still says something when there is no description either', () => {
-    expect(humanFormOf({ error: 'weird_new_code' }, MCP_URL).message.length).toBeGreaterThan(40);
+    // The lead sentence and the repair, both — a length check alone passed
+    // happily on the old text, whose 40+ characters were the no-op advice.
+    const { message } = humanFormOf({ error: 'weird_new_code' }, MCP_URL);
+    expect(message).toMatch(/^The sign-in did not complete\./);
+    expect(message).toMatch(/Clear authentication/);
   });
 });
 
