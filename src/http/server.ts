@@ -29,7 +29,7 @@ import {
 import { renderProjectSelectionPage } from './templates/project-selection.js';
 import { getAnalyticsService, extractClientInfo } from './analytics.js';
 import { sendUnauthorized, protectedResourceMetadata } from './auth-challenge.js';
-import { sendOAuthError } from './oauth-error-response.js';
+import { sendOAuthError, PKCE_REQUIRED_PAGE } from './oauth-error-response.js';
 import {
   mintClientId,
   readClientId,
@@ -519,13 +519,24 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
     // instead of at registration: reject where the caller is listening, not
     // where only a browser can see it. The MCP client reads this response; it
     // never reads the one at the end of the flow.
-    return sendOAuthError(req, res, 400, {
-      error: 'invalid_request',
-      error_description:
-        'code_challenge is required. This server advertises S256 as its only ' +
-        'code_challenge_method and issues authorization codes that carry their own state, ' +
-        'so PKCE is what makes a code safe to accept.',
-    });
+    // An override, because `invalid_request` is emitted from several sites with
+    // different causes and the branch copy belongs to a different one: it tells
+    // the reader their app restarted on a different port, which is true at the
+    // redirect_uri site below and false here. Blair enumerated the sites and
+    // caught this asserting a cause that cannot be the cause.
+    return sendOAuthError(
+      req,
+      res,
+      400,
+      {
+        error: 'invalid_request',
+        error_description:
+          'code_challenge is required. This server advertises S256 as its only ' +
+          'code_challenge_method and issues authorization codes that carry their own state, ' +
+          'so PKCE is what makes a code safe to accept.',
+      },
+      PKCE_REQUIRED_PAGE
+    );
   }
 
   if (response_type !== 'code') {

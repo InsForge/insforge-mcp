@@ -171,6 +171,94 @@ export function reconnectCommand(mcpUrl: string): string[] {
 }
 
 /**
+ * The step that actually clears a stuck client, in the words the page uses.
+ *
+ * One constant rather than a sentence copied into each branch. It has been
+ * corrected three times now — the installer that was the wrong product, the
+ * reconnect that repaired nothing on its own, the second remove for the scope
+ * `-g` misses — and every correction had to find each copy. The branch below
+ * that nobody remembered to update is what this constant exists to prevent.
+ *
+ * DO NOT simplify this to "remove the server and add it back". That reads as
+ * the friendlier instruction and it repairs nothing. Quinn traced the shipped
+ * Claude Code v2.1.220 binary: the menu action reaches
+ * `clearServerTokensFromLocalStorage` with `preserveClientRegistration` falsy,
+ * which deletes the whole `mcpOAuth` record including `clientId` — that is why
+ * the TUI step is a real repair. The two substitutes a person would reach for
+ * instead are not. `claude mcp remove` calls the same function behind a catch
+ * that swallows its failure, and both records survive it (measured on seeded
+ * files in an isolated HOME). `npx add-mcp remove` cannot help in principle: it
+ * writes `~/.mcp.json`, and the OAuth record lives in `~/.claude.json`.
+ *
+ * So of the three remedies a stuck user might try, exactly one clears anything,
+ * and it is the one that cannot be pasted from a code block.
+ *
+ * AND THE PERSON IS THE ONLY ONE WHO CAN DO IT — the client will not heal on a
+ * retry, by design. Max read the same binary from the other end:
+ *
+ *   fEs(name, cfg)                       menu action, no options -> deletes the
+ *                                        whole record            (Quinn's read)
+ *   fEs(e, t, {preserveClientRegistration: A})   the AUTOMATIC re-auth path
+ *     A = !a?.clientId || _ === u || a.redirectUri === E
+ *     returning user, unchanged callback port -> A is TRUE -> registration KEPT
+ *
+ * So the dead id survives every automatic re-authentication as long as the
+ * client's loopback port is stable, which for a returning user it is. Retrying
+ * cannot fix this; that is the mechanism, not a guess about SDK behaviour.
+ *
+ * One dead end this closes, so nobody spends a day on it: v2.0.0 had a
+ * self-heal — `invalid_client` whose description contained "Client not found"
+ * deleted the clientId and re-registered — and that string does not appear
+ * anywhere in 2.1.220. Rewording our error to trigger it fails twice over,
+ * because the branch is gone AND our 400 is rendered at `/oauth/authorize` to a
+ * BROWSER. The client process is sat on its localhost callback and never reads
+ * that response. No wording we choose can reach it, which is exactly why the
+ * page talks to the person instead.
+ */
+const CLEARING_INSTRUCTION =
+  'In Claude Code: run /mcp, pick this server, and choose Clear authentication. In Codex: run ' +
+  'the first command below. Then reconnect with the last one. Run the commands from the project ' +
+  'directory where you use InsForge — one of them only looks there.';
+
+/**
+ * Terminate a sentence we did not write before another one follows it.
+ *
+ * The only text this is ever applied to is the platform's forwarded
+ * `error_description`, which is outside our control and carries no punctuation
+ * guarantee — "The user denied the request" is a real one. Joined with a bare
+ * space it runs straight into the next sentence: "...denied the request In
+ * Claude Code: run /mcp". Our own literal fallbacks end in a full stop, which
+ * is exactly why the seam was invisible until Blair read the rendered copy.
+ */
+function endsSentence(text: string): string {
+  const trimmed = text.trim();
+  return /[.!?:;]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+/**
+ * The missing-PKCE page, as a value rather than an object literal at the site.
+ *
+ * `invalid_request` is emitted from several places with different causes, and
+ * the branch copy belongs to one of them — the redirect_uri mismatch, where
+ * "your app restarted on a different port" is true. At the PKCE site it is
+ * false, which is worse than an unhelpful remedy: it is a wrong cause, and it
+ * sends someone looking for a problem they do not have.
+ *
+ * So the site overrides. It lives HERE rather than inline in server.ts for the
+ * one reason that matters: page copy in this file is unit-testable, and the
+ * overrides written inline at their call sites are not tested by anything.
+ * Copy is Blair's.
+ */
+export const PKCE_REQUIRED_PAGE: HumanForm = {
+  heading: 'Your client skipped a required security step',
+  message:
+    'Sign-ins here need PKCE, and this request arrived without it. Nothing is wrong with ' +
+    'your account and there is nothing to undo. The fix is in the client: it needs to send ' +
+    'a code_challenge using S256.',
+  action: undefined,
+};
+
+/**
  * What to tell a person, given the machine-readable error.
  *
  * Pure and exported so the wording is testable without standing up express —
@@ -178,6 +266,21 @@ export function reconnectCommand(mcpUrl: string): string[] {
  * would be least likely to assert.
  */
 export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
+  // The type says string. The VALUE comes from `req.query`, where a repeated
+  // parameter is parsed as an array — `?error_description=a&error_description=b`
+  // arrives as `['a','b']`, and the callback forwards it with a cast, which is a
+  // claim rather than a conversion. So `.trim()` threw a TypeError and express
+  // rendered its own stack trace, with file paths, to the person the page exists
+  // to help. Anyone can craft that URL.
+  //
+  // Normalised here rather than at the callback because this helper is what
+  // every browser-visible error goes through — fixing the one caller that
+  // happens to be reachable today is the mistake this file was written to stop.
+  // Anything that is not a string is treated as absent, so the generic page is
+  // what a hostile query gets.
+  const description =
+    typeof body.error_description === 'string' ? body.error_description : undefined;
+
   switch (body.error) {
     case 'invalid_client':
       return {
@@ -185,10 +288,8 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
         message:
           'Nothing is wrong with your account and no data was lost. Your editor has saved an ' +
           'authorisation for this server that this server no longer recognises, and it will keep ' +
-          'reusing it until you clear it. In Claude Code: run /mcp, pick this server, and choose ' +
-          'Clear authentication. In Codex: run the first command below. Then reconnect with the ' +
-          'last one. Run the commands from the project directory where you use InsForge — one of ' +
-          'them only looks there.',
+          'reusing it until you clear it. ' +
+          CLEARING_INSTRUCTION,
         action: reconnectCommand(mcpUrl),
       };
 
@@ -202,10 +303,8 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
         message:
           'The address your app asked us to send you back to is not the one it registered — ' +
           'usually because it restarted on a different port. Clearing the saved authorisation is ' +
-          'what fixes it. In Claude Code: run /mcp, pick this server, and choose Clear ' +
-          'authentication. In Codex: run the first command below. Then reconnect with the last. ' +
-          'Run the commands from the project directory where you use InsForge — one of them only ' +
-          'looks there.',
+          'what fixes it. ' +
+          CLEARING_INSTRUCTION,
         action: reconnectCommand(mcpUrl),
       };
 
@@ -217,14 +316,70 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
           'the details below are what support will ask for.',
       };
 
+    case 'access_denied':
+      // Nothing is stale here — they cancelled. Clearing the authorisation
+      // would destroy a registration that works and land them back on the same
+      // consent screen, so this branch exists to keep the repair instruction
+      // away from the one code we know does not need it.
+      //
+      // Reachable on exactly one path, and the flip makes it likelier rather
+      // than rarer: /oauth/callback bounces a platform error back to the
+      // client's own redirect_uri when it can open the auth state, and only
+      // renders this page when it cannot (server.ts). A cancel whose state
+      // cookie is missing or host-scoped to the other hostname is precisely
+      // what a cutover window produces.
+      //
+      // Copy is Blair's, who caught that the default branch was pinning the
+      // wrong remedy here.
+      // "Not approved" rather than "you cancelled": RFC 6749 §4.1.2.1 defines
+      // this as the resource owner OR the authorization server denying, so the
+      // cancel wording is false in the policy case and sends someone hunting
+      // for a mistake they did not make. It also matches the family already
+      // here — "This sign-in took too long", "did not come back complete".
+      return {
+        heading: 'This sign-in was not approved',
+        message:
+          'Nothing was changed and nothing is wrong with your account. Start it again from ' +
+          'your editor or client, and approve the request to continue.',
+      };
+
+    case 'unsupported_response_type':
+      // One emitting site (the response_type check at authorize), so a branch
+      // rather than an override. Clearing cannot fix a client that asks for the
+      // wrong response type, and there is nothing for the reader to undo.
+      return {
+        heading: 'Your client asked for a sign-in this server does not support',
+        message:
+          'This server only issues authorization codes, and your client asked for something ' +
+          'else. Nothing is wrong with your account and there is nothing to undo. The fix is ' +
+          'in the client, so if someone else ships it, that is who to report it to.',
+      };
+
     default:
+      // No commands, and deliberately no clearing instruction.
+      //
+      // This branch used to recommend remove-and-re-add (a measured no-op), and
+      // the first fix replaced it with the clearing instruction — which is the
+      // same error with a better remedy attached to the wrong cause. What
+      // actually arrives here decides it, and it is enumerable rather than
+      // arguable. The platform's /oauth/v1/authorize answers every rejection it
+      // makes with a 400 JSON body instead of a redirect, so those never re-enter
+      // this server at all; the one code it does put on our callback is
+      // `access_denied`, which has its own branch above. Everything else landing
+      // here is a code we do not choose and have never seen.
+      //
+      // None of them is a stale registration — that is `invalid_client`, which
+      // has its own branch — so telling a stranger to clear a working sign-in
+      // during a cutover would be this file's own bug pointed a third way.
+      //
+      // The description, when the platform sent one, is kept and led with: it is
+      // the only account of what actually failed. `.trim() ||` because a
+      // present-but-blank description is truthy and skipped the fallback,
+      // rendering a lone leading full stop — reachable by hand-crafting
+      // `?error=x&error_description=%20` on the callback.
       return {
         heading: 'Sign-in could not be completed',
-        message:
-          body.error_description ||
-          'The sign-in did not complete. Removing the InsForge MCP server from your client ' +
-          'and adding it back is the usual remedy.',
-        action: reconnectCommand(mcpUrl),
+        message: `${endsSentence(description?.trim() || 'The sign-in did not complete.')} Start it again from your editor or client.`,
       };
   }
 }
