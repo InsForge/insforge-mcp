@@ -820,6 +820,43 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
       );
     }
 
+    // Same distinction as the refresh grant, on the path a ROTATION actually
+    // hits: during one nobody holds a refresh token yet, so everyone is doing a
+    // fresh sign-in and arrives here. `invalid_client` means the platform
+    // rejected OUR credentials — a wrong INSFORGE_CLIENT_SECRET — and telling
+    // the person their sign-in failed sends them round a loop that cannot
+    // terminate, because every retry fails identically until an operator fixes
+    // the config. Max caught this one; I had fixed only the refresh path.
+    if (tokens.error === 'invalid_client' || tokens.error === 'unauthorized_client') {
+      console.error(
+        '[OAuth] The platform rejected OUR client credentials during sign-in. ' +
+          'INSFORGE_CLIENT_ID/SECRET are wrong for this deployment — no user action ' +
+          'can fix this.'
+      );
+      getAnalyticsService().trackOAuthFailure({
+        errorType: 'server_error',
+        errorDescription: 'Platform rejected our client credentials at the callback',
+        endpoint: '/oauth/callback',
+      });
+      res.set('Retry-After', '30');
+      return sendOAuthError(
+        req,
+        res,
+        503,
+        {
+          error: 'temporarily_unavailable',
+          error_description: 'This server cannot complete sign-ins right now.',
+        },
+        {
+          heading: 'Sign-in is temporarily unavailable',
+          message:
+            'This is a problem on our side, not with your account or your editor, and ' +
+            'retrying now will not help. We can see it; try again in a few minutes.',
+          action: undefined,
+        }
+      );
+    }
+
     if (tokens.error || !tokens.access_token) {
       console.error('[OAuth] Token exchange error:', tokens);
       getAnalyticsService().trackOAuthFailure({
