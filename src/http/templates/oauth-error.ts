@@ -105,8 +105,27 @@ export function renderOAuthErrorPage(options: OAuthErrorPageOptions): string {
 </html>`;
 }
 
+/**
+ * Escape, and survive a value that is not a string.
+ *
+ * The type says string and the DEPLOYED build proved that is a claim rather
+ * than a fact. `?error=x&error_description=a&error_description=b` gives express
+ * an array, the callback forwards it with a cast, and this function's
+ * `.replace` threw — so the page rendered express's own error instead: a stack
+ * trace with absolute paths and the dependency tree, to anyone who crafts that
+ * URL, unauthenticated. Max found it live on the slug.
+ *
+ * `humanFormOf` now normalises that field, which closes the known route. This
+ * coercion is here because this function is the one that OWNS every
+ * browser-visible field and it trusted its input — the layer below where anyone
+ * was looking. Fixing only the caller I know about is how the same crash
+ * survives in the next field someone adds.
+ *
+ * `String(...)` rather than a throw or an empty string: a page that renders
+ * "a,b" is ugly and harmless, and the failure this replaces was neither.
+ */
 function escapeHtml(text: string): string {
-  return text
+  return String(text)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
