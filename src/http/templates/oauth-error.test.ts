@@ -42,3 +42,34 @@ describe('renderOAuthErrorPage', () => {
     expect(html).not.toContain('</title><script>');
   });
 });
+
+describe('the escape survives a value that is not a string', () => {
+  /**
+   * The deployed build rendered express's own stack trace — absolute paths and
+   * the dependency tree — to anyone who crafted
+   * `?error=x&error_description=a&error_description=b`, because express parses
+   * a repeated parameter as an array and `.replace` is not a function on one.
+   *
+   * `humanFormOf` normalises that field now, so this is the second layer. It is
+   * here because this renderer owns every browser-visible field and trusted its
+   * input, which is one level below where anyone was looking.
+   */
+  it.each([
+    ['an array', ['a', 'b']],
+    ['a number', 42],
+    ['null', null],
+    ['undefined', undefined],
+    ['an object', { toString: () => 'obj' }],
+  ])('renders rather than throwing for %s', (_label, value) => {
+    const render = () =>
+      renderOAuthErrorPage({ heading: value as unknown as string, message: 'm' });
+    expect(render).not.toThrow();
+    expect(render()).toContain('<!DOCTYPE html>');
+  });
+
+  it('still escapes when the value is a string', () => {
+    const html = renderOAuthErrorPage({ heading: 'h', message: '<script>alert(1)</script>' });
+    expect(html).not.toContain('<script>');
+    expect(html).toContain('&lt;script&gt;');
+  });
+});
