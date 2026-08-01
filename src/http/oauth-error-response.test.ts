@@ -107,6 +107,35 @@ describe('every browser-visible failure says what to do', () => {
     }
   });
 
+  // The property, over every code rather than over the two branches someone
+  // remembered. The test above asserted the right thing about the wrong set:
+  // it named `invalid_client` and `invalid_request` explicitly, so the default
+  // branch went on telling people to remove the server and add it back — the
+  // remedy this same file documents as a no-op — for as long as nobody looked.
+  // A test that lists the cases it imagines stops covering the one it does not.
+  //
+  // Quinn traced why the distinction matters: only the Claude Code TUI action
+  // deletes the mcpOAuth record. `claude mcp remove` swallows its own failure
+  // and `npx add-mcp remove` writes a different file entirely, so commands
+  // printed without the menu step leave the user in the loop the page exists
+  // to end.
+  it.each([
+    ['invalid_client', undefined],
+    ['invalid_request', undefined],
+    ['unsupported_response_type', 'Only response_type=code is supported'],
+    ['access_denied', undefined],
+    ['access_denied', 'The user denied the request'],
+    ['token_exchange_failed', undefined],
+    ['weird_new_code', undefined],
+    ['weird_new_code', 'the disk melted'],
+  ])('%s (description: %s) never prints the commands without the step that makes them work', (error, error_description) => {
+    const { message, action } = humanFormOf({ error, error_description }, MCP_URL);
+    if (!action) return; // server_error offers no commands, so it needs no clearing step
+    expect(message).toMatch(/Clear authentication/);
+    // And it must not recommend the substitute that repairs nothing.
+    expect(message).not.toMatch(/adding it back is the usual remedy/);
+  });
+
   it('names the host the person is actually talking to, in BOTH commands', () => {
     // On the Manufact slug it must say the slug, or someone follows the
     // instruction and reconnects to the box we are migrating off.
@@ -142,9 +171,17 @@ describe('every browser-visible failure says what to do', () => {
     expect(human.message).toMatch(/different port/);
   });
 
-  it('falls back to the description for a code it has never seen', () => {
-    expect(humanFormOf({ error: 'weird_new_code', error_description: 'the disk melted' }, MCP_URL).message)
-      .toBe('the disk melted');
+  it('leads with the description for a code it has never seen', () => {
+    // Deliberately no longer the description ALONE. It is the only account of
+    // what actually failed, so it is kept and it comes first — but it used to
+    // arrive with the reconnect commands and no way to make them work, which
+    // is the same trap as the fallback sentence it sits beside.
+    const { message } = humanFormOf(
+      { error: 'weird_new_code', error_description: 'the disk melted' },
+      MCP_URL
+    );
+    expect(message).toMatch(/^the disk melted/);
+    expect(message).toMatch(/Clear authentication/);
   });
 
   it('still says something when there is no description either', () => {

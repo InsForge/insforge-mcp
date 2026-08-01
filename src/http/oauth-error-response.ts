@@ -171,6 +171,34 @@ export function reconnectCommand(mcpUrl: string): string[] {
 }
 
 /**
+ * The step that actually clears a stuck client, in the words the page uses.
+ *
+ * One constant rather than a sentence copied into each branch. It has been
+ * corrected three times now — the installer that was the wrong product, the
+ * reconnect that repaired nothing on its own, the second remove for the scope
+ * `-g` misses — and every correction had to find each copy. The branch below
+ * that nobody remembered to update is what this constant exists to prevent.
+ *
+ * DO NOT simplify this to "remove the server and add it back". That reads as
+ * the friendlier instruction and it repairs nothing. Quinn traced the shipped
+ * Claude Code v2.1.220 binary: the menu action reaches
+ * `clearServerTokensFromLocalStorage` with `preserveClientRegistration` falsy,
+ * which deletes the whole `mcpOAuth` record including `clientId` — that is why
+ * the TUI step is a real repair. The two substitutes a person would reach for
+ * instead are not. `claude mcp remove` calls the same function behind a catch
+ * that swallows its failure, and both records survive it (measured on seeded
+ * files in an isolated HOME). `npx add-mcp remove` cannot help in principle: it
+ * writes `~/.mcp.json`, and the OAuth record lives in `~/.claude.json`.
+ *
+ * So of the three remedies a stuck user might try, exactly one clears anything,
+ * and it is the one that cannot be pasted from a code block.
+ */
+const CLEARING_INSTRUCTION =
+  'In Claude Code: run /mcp, pick this server, and choose Clear authentication. In Codex: run ' +
+  'the first command below. Then reconnect with the last one. Run the commands from the project ' +
+  'directory where you use InsForge — one of them only looks there.';
+
+/**
  * What to tell a person, given the machine-readable error.
  *
  * Pure and exported so the wording is testable without standing up express —
@@ -185,10 +213,8 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
         message:
           'Nothing is wrong with your account and no data was lost. Your editor has saved an ' +
           'authorisation for this server that this server no longer recognises, and it will keep ' +
-          'reusing it until you clear it. In Claude Code: run /mcp, pick this server, and choose ' +
-          'Clear authentication. In Codex: run the first command below. Then reconnect with the ' +
-          'last one. Run the commands from the project directory where you use InsForge — one of ' +
-          'them only looks there.',
+          'reusing it until you clear it. ' +
+          CLEARING_INSTRUCTION,
         action: reconnectCommand(mcpUrl),
       };
 
@@ -202,10 +228,8 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
         message:
           'The address your app asked us to send you back to is not the one it registered — ' +
           'usually because it restarted on a different port. Clearing the saved authorisation is ' +
-          'what fixes it. In Claude Code: run /mcp, pick this server, and choose Clear ' +
-          'authentication. In Codex: run the first command below. Then reconnect with the last. ' +
-          'Run the commands from the project directory where you use InsForge — one of them only ' +
-          'looks there.',
+          'what fixes it. ' +
+          CLEARING_INSTRUCTION,
         action: reconnectCommand(mcpUrl),
       };
 
@@ -218,12 +242,20 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
       };
 
     default:
+      // The branch #101 did not reach, still telling people to remove the
+      // server and add it back — the one remedy this file had already measured
+      // as a no-op, printed under the commands that cannot carry it out. An
+      // unknown code is not a reason to give worse advice than a known one, and
+      // this branch is reachable: /oauth/callback forwards the PLATFORM's error
+      // code verbatim (server.ts) when there is no registered redirect to bounce
+      // it back to, so the codes arriving here are ones we do not choose.
+      //
+      // The description, when the platform sent one, is kept and led with — it
+      // is the only account of what actually failed. What changes is that it no
+      // longer arrives without the step that makes the commands beneath it work.
       return {
         heading: 'Sign-in could not be completed',
-        message:
-          body.error_description ||
-          'The sign-in did not complete. Removing the InsForge MCP server from your client ' +
-          'and adding it back is the usual remedy.',
+        message: `${body.error_description || 'The sign-in did not complete.'} ${CLEARING_INSTRUCTION}`,
         action: reconnectCommand(mcpUrl),
       };
   }
