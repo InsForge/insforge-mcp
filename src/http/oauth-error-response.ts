@@ -236,6 +236,29 @@ function endsSentence(text: string): string {
 }
 
 /**
+ * The missing-PKCE page, as a value rather than an object literal at the site.
+ *
+ * `invalid_request` is emitted from several places with different causes, and
+ * the branch copy belongs to one of them — the redirect_uri mismatch, where
+ * "your app restarted on a different port" is true. At the PKCE site it is
+ * false, which is worse than an unhelpful remedy: it is a wrong cause, and it
+ * sends someone looking for a problem they do not have.
+ *
+ * So the site overrides. It lives HERE rather than inline in server.ts for the
+ * one reason that matters: page copy in this file is unit-testable, and the
+ * overrides written inline at their call sites are not tested by anything.
+ * Copy is Blair's.
+ */
+export const PKCE_REQUIRED_PAGE: HumanForm = {
+  heading: 'Your client skipped a required security step',
+  message:
+    'Sign-ins here need PKCE, and this request arrived without it. Nothing is wrong with ' +
+    'your account and there is nothing to undo. The fix is in the client: it needs to send ' +
+    'a code_challenge using S256.',
+  action: undefined,
+};
+
+/**
  * What to tell a person, given the machine-readable error.
  *
  * Pure and exported so the wording is testable without standing up express —
@@ -293,31 +316,55 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
       //
       // Copy is Blair's, who caught that the default branch was pinning the
       // wrong remedy here.
+      // "Not approved" rather than "you cancelled": RFC 6749 §4.1.2.1 defines
+      // this as the resource owner OR the authorization server denying, so the
+      // cancel wording is false in the policy case and sends someone hunting
+      // for a mistake they did not make. It also matches the family already
+      // here — "This sign-in took too long", "did not come back complete".
       return {
-        heading: 'You cancelled this sign-in',
-        message: 'You cancelled the sign-in. Start it again and approve to continue.',
+        heading: 'This sign-in was not approved',
+        message:
+          'Nothing was changed and nothing is wrong with your account. Start it again from ' +
+          'your editor or client, and approve the request to continue.',
+      };
+
+    case 'unsupported_response_type':
+      // One emitting site (the response_type check at authorize), so a branch
+      // rather than an override. Clearing cannot fix a client that asks for the
+      // wrong response type, and there is nothing for the reader to undo.
+      return {
+        heading: 'Your client asked for a sign-in this server does not support',
+        message:
+          'This server only issues authorization codes, and your client asked for something ' +
+          'else. Nothing is wrong with your account and there is nothing to undo. The fix is ' +
+          'in the client, so if someone else ships it, that is who to report it to.',
       };
 
     default:
-      // The branch #101 did not reach, still telling people to remove the
-      // server and add it back — the one remedy this file had already measured
-      // as a no-op, printed under the commands that cannot carry it out. An
-      // unknown code is not a reason to give worse advice than a known one, and
-      // this branch is reachable: /oauth/callback forwards the PLATFORM's error
-      // code verbatim (server.ts) when there is no registered redirect to bounce
-      // it back to, so the codes arriving here are ones we do not choose.
+      // No commands, and deliberately no clearing instruction.
       //
-      // The description, when the platform sent one, is kept and led with — it
-      // is the only account of what actually failed. What changes is that it no
-      // longer arrives without the step that makes the commands beneath it work.
+      // This branch used to recommend remove-and-re-add (a measured no-op), and
+      // the first fix replaced it with the clearing instruction — which is the
+      // same error with a better remedy attached to the wrong cause. What
+      // actually arrives here decides it, and it is enumerable rather than
+      // arguable. The platform's /oauth/v1/authorize answers every rejection it
+      // makes with a 400 JSON body instead of a redirect, so those never re-enter
+      // this server at all; the one code it does put on our callback is
+      // `access_denied`, which has its own branch above. Everything else landing
+      // here is a code we do not choose and have never seen.
+      //
+      // None of them is a stale registration — that is `invalid_client`, which
+      // has its own branch — so telling a stranger to clear a working sign-in
+      // during a cutover would be this file's own bug pointed a third way.
+      //
+      // The description, when the platform sent one, is kept and led with: it is
+      // the only account of what actually failed. `.trim() ||` because a
+      // present-but-blank description is truthy and skipped the fallback,
+      // rendering a lone leading full stop — reachable by hand-crafting
+      // `?error=x&error_description=%20` on the callback.
       return {
         heading: 'Sign-in could not be completed',
-        // `.trim() ||` rather than `||`: a present-but-blank description is
-        // truthy, so it skipped the fallback and rendered a lone leading full
-        // stop. Reachable by hand-crafting `?error=x&error_description=%20` on
-        // the callback, which makes it cheaper to handle than to argue about.
-        message: `${endsSentence(body.error_description?.trim() || 'The sign-in did not complete.')} ${CLEARING_INSTRUCTION}`,
-        action: reconnectCommand(mcpUrl),
+        message: `${endsSentence(body.error_description?.trim() || 'The sign-in did not complete.')} Start it again from your editor or client.`,
       };
   }
 }

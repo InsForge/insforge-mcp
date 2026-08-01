@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { humanFormOf, prefersHtml, reconnectCommand, sendOAuthError } from './oauth-error-response.js';
+import { humanFormOf, prefersHtml, reconnectCommand, sendOAuthError, PKCE_REQUIRED_PAGE } from './oauth-error-response.js';
 
 const MCP_URL = 'https://mcp.insforge.dev/mcp';
 
@@ -125,13 +125,13 @@ describe('every browser-visible failure says what to do', () => {
   // required it. That is this same bug pointed the other way — a test naming one
   // remedy stops distinguishing the cases where that remedy is not the remedy.
   // Blair caught it against the rendered page.
+  //
+  // The table is now exactly the codes that mean a stale registration, which is
+  // the only thing clearing repairs. Everything else moved to the table below —
+  // see the comment there for why that direction is the load-bearing one.
   it.each([
     ['invalid_client', undefined],
     ['invalid_request', undefined],
-    ['unsupported_response_type', 'Only response_type=code is supported'],
-    ['token_exchange_failed', undefined],
-    ['weird_new_code', undefined],
-    ['weird_new_code', 'the disk melted'],
   ])('%s (description: %s) never prints the commands without the step that makes them work', (error, error_description) => {
     const { message, action } = humanFormOf({ error, error_description }, MCP_URL);
     // Asserted, not guarded. This read `if (!action) return` — meant for
@@ -152,15 +152,58 @@ describe('every browser-visible failure says what to do', () => {
   // clearing must not be handed the clearing instruction. Without this the two
   // tables are just a list and nothing stops `access_denied` drifting back into
   // the default branch, which is how it got the wrong advice in the first place.
+  //
+  // The unknown codes belong here rather than above, and that is the decision
+  // this table encodes. What can actually reach the catch-all is enumerable:
+  // the platform answers every rejection it makes at its own authorize endpoint
+  // with a 400 JSON body rather than a redirect, so those never re-enter this
+  // server; the single code it puts on our callback is `access_denied`. Nothing
+  // arriving here is a stale registration, so nothing arriving here should be
+  // told to clear one — least of all a stranger during a cutover.
   it.each([
     ['server_error', undefined],
     ['access_denied', undefined],
     ['access_denied', 'The user denied the request'],
+    ['unsupported_response_type', 'Only response_type=code is supported'],
+    ['login_required', undefined],
+    ['invalid_scope', 'Client not authorized for scopes: mcp:write'],
+    ['temporarily_unavailable', undefined],
+    ['weird_new_code', undefined],
+    ['weird_new_code', 'the disk melted'],
   ])('%s (description: %s) is not told to clear a registration that works', (error, error_description) => {
     const { message, action } = humanFormOf({ error, error_description }, MCP_URL);
     expect(action).toBeUndefined();
     expect(message).not.toMatch(/Clear authentication/);
     expect(message).not.toMatch(/add(ing)? it back/i);
+  });
+
+  // The table above cannot tell a dedicated branch from the catch-all, because
+  // the catch-all is now command-free too and satisfies every negative in it.
+  // Deleting either branch left the suite green — so these pin the thing that
+  // makes them branches at all: they name what happened in their own words.
+  it.each([
+    ['access_denied', 'This sign-in was not approved'],
+    ['unsupported_response_type', 'Your client asked for a sign-in this server does not support'],
+  ])('%s says what happened in its own words, not the catch-all\'s', (error, heading) => {
+    const human = humanFormOf({ error }, MCP_URL);
+    expect(human.heading).toBe(heading);
+    expect(human.heading).not.toBe(humanFormOf({ error: 'a_code_with_no_branch' }, MCP_URL).heading);
+  });
+
+  it('tells the PKCE case its own cause, not the port one', () => {
+    // `invalid_request` is emitted from several sites with different causes.
+    // The branch copy is right for the redirect_uri mismatch and false here —
+    // a request without code_challenge has nothing to do with a restarted port,
+    // and clearing a registration does not add PKCE to a client. This is the
+    // site override, kept in this file so it is testable at all; the overrides
+    // written inline at their call sites are covered by nothing.
+    expect(PKCE_REQUIRED_PAGE.action).toBeUndefined();
+    expect(PKCE_REQUIRED_PAGE.message).toMatch(/PKCE/);
+    expect(PKCE_REQUIRED_PAGE.message).toMatch(/code_challenge/);
+    expect(PKCE_REQUIRED_PAGE.message).not.toMatch(/different port/);
+    expect(PKCE_REQUIRED_PAGE.message).not.toMatch(/Clear authentication/);
+    // The branch it overrides asserts the cause it must not inherit.
+    expect(humanFormOf({ error: 'invalid_request' }, MCP_URL).message).toMatch(/different port/);
   });
 
   it('treats a blank description as no description', () => {
@@ -183,11 +226,11 @@ describe('every browser-visible failure says what to do', () => {
       { error: 'weird_new_code', error_description: 'the platform said no' },
       MCP_URL
     );
-    expect(message).toContain('the platform said no. In Claude Code');
+    expect(message).toContain('the platform said no. Start it again');
     // A description that already punctuates itself is not given a second stop.
     expect(
       humanFormOf({ error: 'weird_new_code', error_description: 'it broke.' }, MCP_URL).message
-    ).toContain('it broke. In Claude Code');
+    ).toContain('it broke. Start it again');
   });
 
   it('names the host the person is actually talking to, in BOTH commands', () => {
@@ -229,21 +272,22 @@ describe('every browser-visible failure says what to do', () => {
     // Deliberately no longer the description ALONE. It is the only account of
     // what actually failed, so it is kept and it comes first — but it used to
     // arrive with the reconnect commands and no way to make them work, which
-    // is the same trap as the fallback sentence it sits beside.
+    // is the same trap as the fallback sentence it sits beside. It now closes
+    // with the one instruction that is true for every unknown code.
     const { message } = humanFormOf(
       { error: 'weird_new_code', error_description: 'the disk melted' },
       MCP_URL
     );
     expect(message).toMatch(/^the disk melted/);
-    expect(message).toMatch(/Clear authentication/);
+    expect(message).toMatch(/Start it again from your editor or client.$/);
   });
 
   it('still says something when there is no description either', () => {
-    // The lead sentence and the repair, both — a length check alone passed
+    // The lead sentence and a next step, both — a length check alone passed
     // happily on the old text, whose 40+ characters were the no-op advice.
     const { message } = humanFormOf({ error: 'weird_new_code' }, MCP_URL);
     expect(message).toMatch(/^The sign-in did not complete\./);
-    expect(message).toMatch(/Clear authentication/);
+    expect(message).toMatch(/Start it again from your editor or client\.$/);
   });
 });
 
