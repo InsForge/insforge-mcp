@@ -1,9 +1,10 @@
 import { createHash, randomBytes } from 'crypto';
 import { sealAuthState, openAuthState, InvalidAuthStateError } from './auth-state.js';
 import { issueAccessToken, readAccessToken } from './access-token.js';
+import { issueRefreshToken } from './refresh-token.js';
 import { getProjectKeyCache } from './project-key-cache.js';
 import { newStateHandle } from './auth-state-cookie.js';
-import { authStateKey, authCodeKey, accessTokenKey } from './config.js';
+import { authStateKey, authCodeKey, accessTokenKey, refreshTokenKey } from './config.js';
 import { isAuthorizationRefusal } from './error-status.js';
 import {
   validateToken,
@@ -242,6 +243,26 @@ export class OAuthManager {
       accessTokenKey()
     );
 
+    // Ours, sealed here rather than at the token endpoint, so the code carries
+    // two tokens of OURS instead of one of ours beside a raw platform
+    // credential. The values it needs — user and project — are in scope at this
+    // point and nowhere later, so building it anywhere else would mean
+    // forwarding them for no reason.
+    //
+    // Undefined when the platform sent no refresh token: an older platform, or
+    // a grant that does not issue one. That is a client without renewal, which
+    // is exactly today's behaviour, rather than an error.
+    const refreshToken = authState.platformRefreshToken
+      ? issueRefreshToken(
+          {
+            userId: user.id,
+            platformRefreshToken: authState.platformRefreshToken,
+            projectId: projectAccess.projectId,
+          },
+          refreshTokenKey()
+        )
+      : undefined;
+
     // No binding row: the access token IS the record. See access-token.ts for
     // why the platform token goes in and the project API key deliberately does
     // not.
@@ -272,11 +293,7 @@ export class OAuthManager {
     const code = sealAuthState(
       {
         accessToken,
-        // Taken from the state rather than added as a parameter: it arrived at
-        // the callback, and threading it through the signature would let a
-        // caller supply an access token and a refresh token that belong to
-        // different sign-ins.
-        refreshToken: authState.platformRefreshToken,
+        refreshToken,
         redirectUri: authState.redirectUri,
         codeChallenge: authState.codeChallenge,
         codeChallengeMethod: authState.codeChallengeMethod,

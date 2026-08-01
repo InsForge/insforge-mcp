@@ -95,8 +95,17 @@ export const OAUTH_CONFIG = {
   /** Scopes supported by this MCP server */
   supportedScopes: ['mcp:read', 'mcp:write', 'project:select'],
 
-  /** Grant types supported */
-  grantTypes: ['authorization_code'],
+  /**
+   * Grant types supported.
+   *
+   * `refresh_token` is advertised here, which is what puts it in
+   * `grant_types_supported` on the AS metadata and in the default registration
+   * response — the two places a client looks before it will ever try to renew.
+   * Advertising it is therefore part of the feature, not documentation of it: a
+   * client that does not see it here keeps signing in through a browser every
+   * hour even though the endpoint would answer.
+   */
+  grantTypes: ['authorization_code', 'refresh_token'],
 
   /** Response types supported */
   responseTypes: ['code'],

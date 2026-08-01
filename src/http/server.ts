@@ -45,11 +45,12 @@ import {
   isAcceptableClientState,
   MAX_CLIENT_STATE_LENGTH,
 } from './auth-state-cookie.js';
-import { ACCESS_TOKEN_TTL_SECONDS, accessTokenLifetimeSeconds, readAccessToken } from './access-token.js';
+import { ACCESS_TOKEN_TTL_SECONDS, accessTokenLifetimeSeconds, readAccessToken, issueAccessToken } from './access-token.js';
+import { readRefreshToken } from './refresh-token.js';
 import { getProjectKeyCache } from './project-key-cache.js';
-import { accessTokenKey } from './config.js';
+import { accessTokenKey, refreshTokenKey } from './config.js';
 import { statusForHttpError, isAuthorizationRefusal } from './error-status.js';
-import { revokePlatformToken, exchangePlatformCode, type PlatformTokens } from './insforge-api.js';
+import { revokePlatformToken, exchangePlatformCode, refreshPlatformToken, type PlatformTokens } from './insforge-api.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
 
 // ============================================================================
@@ -987,14 +988,94 @@ app.post(OAUTH_ENDPOINTS.token, async (req: Request, res: Response) => {
       });
     }
   } else if (grant_type === 'refresh_token') {
-    getAnalyticsService().trackOAuthFailure({
-      errorType: 'unsupported_grant_type',
-      errorDescription: 'Refresh tokens are not supported',
-      endpoint: '/oauth/token',
+    // Until now this answered `unsupported_grant_type`, which is why every
+    // connected client died after an hour: the platform token sealed in our
+    // access token is a ONE-HOUR JWT, we advertise whichever expiry is sooner,
+    // and there was no way back except a browser. For a CLI that is an
+    // annoyance; for a hosted connector signed in once in someone else's
+    // browser it is a broken integration.
+    const { refresh_token } = req.body;
+
+    if (!refresh_token) {
+      return res.status(400).json({
+        error: 'invalid_request',
+        error_description: 'Missing required parameter: refresh_token',
+      });
+    }
+
+    // Null covers expired, forged, and sealed under a rotated secret alike —
+    // deliberately one answer, since a caller able to tell them apart would be
+    // an oracle. All of them mean the same thing to a client: sign in again.
+    const payload = readRefreshToken(refresh_token as string, refreshTokenKey());
+    if (!payload) {
+      getAnalyticsService().trackOAuthFailure({
+        errorType: 'invalid_grant',
+        errorDescription: 'Refresh token is expired or not ours',
+        endpoint: '/oauth/token',
+      });
+      return res.status(400).json({
+        error: 'invalid_grant',
+        error_description: 'This refresh token has expired or is not valid. Sign in again.',
+      });
+    }
+
+    let tokens: PlatformTokens;
+    try {
+      tokens = await refreshPlatformToken({
+        refreshToken: payload.platformRefreshToken,
+        clientId: INSFORGE_CONFIG.clientId,
+        clientSecret: INSFORGE_CONFIG.clientSecret,
+      });
+    } catch (error) {
+      // Could not reach the platform, which is not the client's fault and may
+      // work on the next attempt — the one case here that must NOT tell someone
+      // to sign in again.
+      console.error('[OAuth] Could not reach the platform to refresh:', error);
+      res.set('Retry-After', '5');
+      return res.status(503).json({
+        error: 'temporarily_unavailable',
+        error_description: 'The InsForge platform could not be reached. Try again shortly.',
+      });
+    }
+
+    if (tokens.error || !tokens.access_token) {
+      // The platform answered and declined: the grant is gone, revoked, or past
+      // its thirty days. That IS sign in again.
+      getAnalyticsService().trackOAuthFailure({
+        errorType: 'invalid_grant',
+        errorDescription: 'Platform refused the refresh token',
+        endpoint: '/oauth/token',
+      });
+      return res.status(400).json({
+        error: 'invalid_grant',
+        error_description: 'This sign-in can no longer be renewed. Sign in again.',
+      });
+    }
+
+    const accessToken = issueAccessToken(
+      {
+        userId: payload.userId,
+        platformAccessToken: tokens.access_token,
+        projectId: payload.projectId,
+      },
+      accessTokenKey()
+    );
+
+    const refreshed = readAccessToken(accessToken, accessTokenKey());
+    getAnalyticsService().trackOAuthSuccess({
+      clientId: req.body.client_id || 'unknown',
+      scope: 'mcp:read mcp:write',
     });
-    return res.status(400).json({
-      error: 'unsupported_grant_type',
-      error_description: 'Refresh tokens are not supported',
+
+    // The SAME refresh token back, not a new one. The platform keeps its own on
+    // refresh, so ours still names a live grant, and re-sealing would hand the
+    // client a different string for no change in what it authorises.
+    return res.json({
+      access_token: accessToken,
+      token_type: 'Bearer',
+      expires_in: refreshed ? accessTokenLifetimeSeconds(refreshed) : ACCESS_TOKEN_TTL_SECONDS,
+      refresh_token,
+      scope: 'mcp:read mcp:write',
     });
   } else {
     getAnalyticsService().trackOAuthFailure({

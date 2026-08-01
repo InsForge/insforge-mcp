@@ -354,6 +354,47 @@ export async function exchangePlatformCode(params: {
 }
 
 /**
+ * Trade the platform refresh token for a fresh platform access token.
+ *
+ * Same endpoint, same client credentials, same two-outcome contract as the code
+ * exchange above: a thrown InsforgeApiError means we could not get an answer, a
+ * returned body carrying `error` means the platform answered and declined. The
+ * caller needs those apart, because one is retryable and the other means the
+ * user has to sign in again.
+ *
+ * The platform does NOT rotate on use — its refresh path generates a new access
+ * token and keeps the same refresh token — so there is nothing to write back
+ * and no rotation race between two concurrent refreshes of one session. If that
+ * ever changes, the response's `refresh_token` becomes load-bearing and this
+ * comment is where to start.
+ */
+export async function refreshPlatformToken(params: {
+  refreshToken: string;
+  clientId: string;
+  clientSecret: string;
+}): Promise<PlatformTokens> {
+  const response = await platformFetch(`${OAUTH_API_BASE}/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      grant_type: 'refresh_token',
+      refresh_token: params.refreshToken,
+      client_id: params.clientId,
+      client_secret: params.clientSecret,
+    }),
+  });
+
+  try {
+    return (await response.json()) as PlatformTokens;
+  } catch {
+    throw new InsforgeApiError(
+      `Token refresh returned an unreadable response (HTTP ${response.status})`,
+      response.status
+    );
+  }
+}
+
+/**
  * Build the access host URL for a project
  * Format: https://{appkey}.{region}.insforge.app
  */
