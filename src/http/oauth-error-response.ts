@@ -139,9 +139,33 @@ export function reconnectCommand(mcpUrl: string): string[] {
   // chunk-2LJORNPV.js). So passing the URL is exact, host-derived by
   // construction, and cannot drift the way a copy of their inference rule
   // would.
+  // TWO removes, not one, because a server can be defined in two scopes at
+  // once and each command clears exactly one of them. From add-mcp@2.0.0's own
+  // source:
+  //
+  //   program.command("remove <query>")
+  //     .option("-g, --global", "Remove from global configs INSTEAD OF
+  //                              project-level")
+  //
+  // "instead of" is the whole problem. Blair demonstrated the consequence on a
+  // machine with the server defined in both places:
+  //
+  //   npx add-mcp remove <url> -y
+  //     -> "Removed 1 server from 1 agent"      the project entry
+  //     -> the user-level entry is STILL THERE
+  //
+  // So the page printed one command, the command reported success, and the
+  // stuck user re-added and stayed stuck — with a cheerful confirmation that
+  // the repair had worked. That is the same silent-partial-success shape this
+  // page exists to end, committed by the page itself.
+  //
+  // Adding `-g` INSTEAD would not fix it either; it just moves which scope is
+  // missed. The honest repair is both, and it is harmless to run either one
+  // when that scope holds nothing — add-mcp reports zero removed and exits 0.
   return [
     'codex mcp logout insforge',
     `npx add-mcp remove ${mcpUrl} -y`,
+    `npx add-mcp remove ${mcpUrl} -g -y`,
     `npx add-mcp ${mcpUrl}`,
   ];
 }
@@ -163,7 +187,8 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
           'authorisation for this server that this server no longer recognises, and it will keep ' +
           'reusing it until you clear it. In Claude Code: run /mcp, pick this server, and choose ' +
           'Clear authentication. In Codex: run the first command below. Then reconnect with the ' +
-          'last one.',
+          'last one. Run the commands from the project directory where you use InsForge — one of ' +
+          'them only looks there.',
         action: reconnectCommand(mcpUrl),
       };
 
@@ -178,7 +203,9 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
           'The address your app asked us to send you back to is not the one it registered — ' +
           'usually because it restarted on a different port. Clearing the saved authorisation is ' +
           'what fixes it. In Claude Code: run /mcp, pick this server, and choose Clear ' +
-          'authentication. In Codex: run the first command below. Then reconnect with the last.',
+          'authentication. In Codex: run the first command below. Then reconnect with the last. ' +
+          'Run the commands from the project directory where you use InsForge — one of them only ' +
+          'looks there.',
         action: reconnectCommand(mcpUrl),
       };
 
