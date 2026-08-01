@@ -795,7 +795,14 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
     // The token rides inside the state instead of a row keyed by it. The
     // state_id therefore CHANGES here — it is the record, so a record with one
     // more field is a different string.
-    const stateWithToken = oauthManager.attachPlatformToken(authState, tokens.access_token);
+    // The refresh token rides along from here. It arrived in this same response
+    // and was dropped on the floor until now, which is the whole reason a
+    // connected client died after an hour.
+    const stateWithToken = oauthManager.attachPlatformToken(
+      authState,
+      tokens.access_token,
+      tokens.refresh_token
+    );
 
     // Same shape as authorize: the record replaces the cookie, the URL carries
     // only the handle. The handle is unchanged, so the two halves still match.
