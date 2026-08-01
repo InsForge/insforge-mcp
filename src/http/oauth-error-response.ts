@@ -192,6 +192,28 @@ export function reconnectCommand(mcpUrl: string): string[] {
  *
  * So of the three remedies a stuck user might try, exactly one clears anything,
  * and it is the one that cannot be pasted from a code block.
+ *
+ * AND THE PERSON IS THE ONLY ONE WHO CAN DO IT — the client will not heal on a
+ * retry, by design. Max read the same binary from the other end:
+ *
+ *   fEs(name, cfg)                       menu action, no options -> deletes the
+ *                                        whole record            (Quinn's read)
+ *   fEs(e, t, {preserveClientRegistration: A})   the AUTOMATIC re-auth path
+ *     A = !a?.clientId || _ === u || a.redirectUri === E
+ *     returning user, unchanged callback port -> A is TRUE -> registration KEPT
+ *
+ * So the dead id survives every automatic re-authentication as long as the
+ * client's loopback port is stable, which for a returning user it is. Retrying
+ * cannot fix this; that is the mechanism, not a guess about SDK behaviour.
+ *
+ * One dead end this closes, so nobody spends a day on it: v2.0.0 had a
+ * self-heal — `invalid_client` whose description contained "Client not found"
+ * deleted the clientId and re-registered — and that string does not appear
+ * anywhere in 2.1.220. Rewording our error to trigger it fails twice over,
+ * because the branch is gone AND our 400 is rendered at `/oauth/authorize` to a
+ * BROWSER. The client process is sat on its localhost callback and never reads
+ * that response. No wording we choose can reach it, which is exactly why the
+ * page talks to the person instead.
  */
 const CLEARING_INSTRUCTION =
   'In Claude Code: run /mcp, pick this server, and choose Clear authentication. In Codex: run ' +
@@ -290,7 +312,11 @@ export function humanFormOf(body: OAuthErrorBody, mcpUrl: string): HumanForm {
       // longer arrives without the step that makes the commands beneath it work.
       return {
         heading: 'Sign-in could not be completed',
-        message: `${endsSentence(body.error_description || 'The sign-in did not complete.')} ${CLEARING_INSTRUCTION}`,
+        // `.trim() ||` rather than `||`: a present-but-blank description is
+        // truthy, so it skipped the fallback and rendered a lone leading full
+        // stop. Reachable by hand-crafting `?error=x&error_description=%20` on
+        // the callback, which makes it cheaper to handle than to argue about.
+        message: `${endsSentence(body.error_description?.trim() || 'The sign-in did not complete.')} ${CLEARING_INSTRUCTION}`,
         action: reconnectCommand(mcpUrl),
       };
   }

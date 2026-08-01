@@ -163,6 +163,17 @@ describe('every browser-visible failure says what to do', () => {
     expect(message).not.toMatch(/add(ing)? it back/i);
   });
 
+  it('treats a blank description as no description', () => {
+    // A present-but-blank `error_description` is truthy, so it used to skip the
+    // fallback and render ". In Claude Code: ..." — a sentence opening with a
+    // full stop. Reachable by hand: ?error=x&error_description=%20.
+    for (const blank of [' ', '   ', '\t']) {
+      const { message } = humanFormOf({ error: 'weird_new_code', error_description: blank }, MCP_URL);
+      expect(message).toMatch(/^The sign-in did not complete\./);
+      expect(message).not.toMatch(/^\s*\./);
+    }
+  });
+
   it('does not run the platform\'s sentence into ours', () => {
     // The forwarded description is not ours and carries no punctuation
     // guarantee. Joined with a bare space, "The user denied the request" ran
