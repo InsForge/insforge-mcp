@@ -1091,9 +1091,42 @@ app.post(OAUTH_ENDPOINTS.token, async (req: Request, res: Response) => {
       });
     }
 
+    // The platform declining OUR credentials is not the user's grant expiring,
+    // and collapsing the two is the same mistake as answering "sign in again"
+    // for an unreachable platform — one step further in.
+    //
+    //   {"error":"invalid_client","message":"Invalid client credentials"}  401
+    //
+    // is what it returns when INSFORGE_CLIENT_SECRET is wrong, which is exactly
+    // what a botched rotation or a half-finished client swap produces. Reported
+    // as invalid_grant it tells EVERY connected user to sign in again, they all
+    // do, and every new sign-in fails the same way — a stampede caused by our
+    // config and blamed on their session. Measured against the real platform
+    // rather than assumed.
+    if (tokens.error === 'invalid_client') {
+      console.error(
+        '[OAuth] The platform rejected OUR client credentials on refresh. ' +
+          'INSFORGE_CLIENT_ID/SECRET are wrong for this deployment — this is not the ' +
+          "user's sign-in expiring."
+      );
+      getAnalyticsService().trackOAuthFailure({
+        errorType: 'server_error',
+        errorDescription: 'Platform rejected our client credentials on refresh',
+        endpoint: '/oauth/token',
+      });
+      // Retryable, and deliberately NOT a re-authentication prompt: nothing the
+      // person does fixes our configuration, and asking them to try is how one
+      // bad PATCH becomes a support queue.
+      res.set('Retry-After', '30');
+      return res.status(503).json({
+        error: 'temporarily_unavailable',
+        error_description: 'This server cannot renew sign-ins right now. Try again shortly.',
+      });
+    }
+
     if (tokens.error || !tokens.access_token) {
-      // The platform answered and declined: the grant is gone, revoked, or past
-      // its thirty days. That IS sign in again.
+      // The platform answered and declined the GRANT: gone, revoked, or past its
+      // thirty days. That one IS sign in again.
       getAnalyticsService().trackOAuthFailure({
         errorType: 'invalid_grant',
         errorDescription: 'Platform refused the refresh token',
