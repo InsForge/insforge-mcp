@@ -211,6 +211,81 @@ if (memory && typeof memory.heapUsedPct === 'number') {
   console.log('  ~ heap not checked: /health reported no memory block');
 }
 
+// --- every predecessor has to be retired ----------------------------------
+//
+// Shipping a fix does not take the bug off the internet. Each deployment of
+// this server is its own Fly machine on its own public hostname, and on
+// 2026-08-03 twenty-four predecessors were still answering — most on a build
+// predating the OAuth fixes, thirteen still serving an unauthenticated stack
+// trace that production had already stopped serving. The fixes landed and the
+// vulnerable surface did not shrink (insforge-mcp#111).
+//
+// The platform is supposed to reap them: POST /deployments/{id}/activate is
+// documented as tearing down the previous production deployment. It does not,
+// and nothing noticed for a month — so the deploy gate asserts it from outside.
+//
+// This has to PROBE, and the two cheaper signals are both actively misleading:
+// the control plane reports `stopped` for machines that are serving traffic,
+// and /health reports a version that was bumped independently of the fixes
+// landing, so two machines advertised the fixed version while still leaking.
+// Neither field is load-bearing. "Does the hostname answer" is the only true
+// statement available, and it is the one this makes.
+//
+// Scored as 'target', not 'external', deliberately. These are other hosts, but
+// a surviving predecessor is a property of THIS deploy — the thing it failed
+// to do — not the health of some third party we happen to depend on.
+const flyHost = healthBase.match(/^https?:\/\/(mcp-[a-z0-9]+)-(\d+)\.fly\.dev$/i);
+if (!flyHost) {
+  // Never a silent skip. Saying nothing here reads as "no orphans found",
+  // which is exactly the false green this check exists to remove.
+  console.log(
+    '  ~ predecessors NOT checked: VERIFY_HEALTH_URL is not an mcp-<id>-<n>.fly.dev host.\n' +
+      '    Orphaned deployments keep serving the bugs this deploy just fixed.\n' +
+      '    On Manufact, set VERIFY_HEALTH_URL=https://mcp-<serverId>-<deployNo>.fly.dev'
+  );
+} else {
+  const [, appPrefix, currentDeploy] = flyHost;
+  const predecessors = [];
+  for (let n = Number(currentDeploy) - 1; n >= 1; n--) predecessors.push(n);
+
+  // Bounded concurrency: this is the widest thing the gate does and it runs on
+  // every deploy. Retired hostnames fail at DNS in milliseconds, so only the
+  // survivors — the ones worth waiting for — cost a round trip.
+  const BATCH = 16;
+  const alive = [];
+  for (let i = 0; i < predecessors.length; i += BATCH) {
+    const settled = await Promise.all(
+      predecessors.slice(i, i + BATCH).map(async (n) => {
+        // Same standard the target /health is held to above: a 200 proves
+        // something answered, not that OUR process did. A retired machine
+        // whose hostname is still fronted by a proxy answering 200 would
+        // otherwise block a clean deploy forever, and an orphan that has to
+        // be named to count for is the only one worth failing on — it is the
+        // one still serving /oauth/*.
+        const res = await fetchOrNull(`https://${appPrefix}-${n}.fly.dev/health`, {
+          headers: { accept: 'application/json' },
+        });
+        if (res?.status !== 200) return null;
+        const body = await res
+          .json()
+          .catch(() => undefined);
+        return body?.server === 'insforge-mcp' ? n : null;
+      })
+    );
+    alive.push(...settled.filter((n) => n !== null));
+  }
+  alive.sort((a, b) => a - b);
+
+  check(
+    'every previous deployment has been retired',
+    alive.length === 0,
+    alive.length === 0
+      ? `${predecessors.length} predecessor hostname(s) checked, none answering`
+      : `${alive.length} of ${predecessors.length} still answering /health: ${appPrefix}-{${alive.join(',')}}.fly.dev — ` +
+        `they serve /oauth/* on public hostnames, so every fix in this deploy is still reachable unfixed there`
+  );
+}
+
 // --- the 401 has to tell a client where to look ---------------------------
 const unauth = await fetchOrNull(base + '/mcp', {
   method: 'POST',
