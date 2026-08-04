@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import { randomUUID, createHash } from 'crypto';
+import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
 import v8 from 'node:v8';
 
 // Transport imports
@@ -45,18 +47,19 @@ import {
   isAcceptableClientState,
   MAX_CLIENT_STATE_LENGTH,
 } from './auth-state-cookie.js';
-import { ACCESS_TOKEN_TTL_SECONDS, accessTokenLifetimeSeconds, readAccessToken } from './access-token.js';
+import { ACCESS_TOKEN_TTL_SECONDS, accessTokenLifetimeSeconds, readAccessToken, issueAccessToken } from './access-token.js';
+import { readRefreshToken } from './refresh-token.js';
 import { getProjectKeyCache } from './project-key-cache.js';
-import { accessTokenKey } from './config.js';
+import { accessTokenKey, refreshTokenKey } from './config.js';
 import { statusForHttpError, isAuthorizationRefusal } from './error-status.js';
-import { revokePlatformToken, exchangePlatformCode, type PlatformTokens } from './insforge-api.js';
+import { revokePlatformToken, exchangePlatformCode, refreshPlatformToken, type PlatformTokens } from './insforge-api.js';
 import { PACKAGE_VERSION } from '../shared/version.js';
 
 // ============================================================================
 // Express App Setup
 // ============================================================================
 
-const app = express();
+export const app = express();
 
 // Trust proxy headers (X-Forwarded-Proto, X-Forwarded-For, etc.)
 // Required for correct protocol detection behind reverse proxies (nginx, AWS ALB, etc.)
@@ -402,6 +405,17 @@ app.get(OAUTH_ENDPOINTS.protectedResource, (_req: Request, res: Response) => {
 /**
  * OAuth Dynamic Client Registration (RFC 7591)
  */
+/**
+ * A registration metadata field the client may send as an array, or not at all,
+ * or as something else entirely — it is request body, so it is not typed.
+ * Anything that is not an array of strings is treated as absent, which lands on
+ * the defaults below rather than on a 400: the goal is to refuse values we
+ * cannot honour, not to police shapes the caller never meant to send.
+ */
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+}
+
 app.post(OAUTH_ENDPOINTS.register, (req: Request, res: Response) => {
   const {
     client_name,
@@ -413,6 +427,38 @@ app.post(OAUTH_ENDPOINTS.register, (req: Request, res: Response) => {
   } = req.body;
 
   const clientName = typeof client_name === 'string' && client_name ? client_name : 'MCP Client';
+
+  // #104: the response used to echo `grant_types` and `response_types` straight
+  // back, so a client that asked for `password` or a device code was TOLD YES at
+  // registration and refused at the token endpoint. A registration response is
+  // the server asserting what it will honour, and a client is entitled to plan
+  // against it.
+  //
+  // Rejected here rather than narrowed silently, for the reason this file keeps
+  // arriving at: refuse where the caller is listening. A client that asked for a
+  // grant it needs should find out now, from a message naming what it can have,
+  // rather than at the first token request in front of a user.
+  const unsupportedGrants = asStringArray(grant_types).filter(
+    (value) => !(OAUTH_CONFIG.grantTypes as readonly string[]).includes(value)
+  );
+  if (unsupportedGrants.length > 0) {
+    return res.status(400).json({
+      error: 'invalid_client_metadata',
+      error_description:
+        `grant_types contains values this server does not support: ${unsupportedGrants.join(', ')}. ` +
+        `Supported: ${OAUTH_CONFIG.grantTypes.join(', ')}.`,
+    });
+  }
+
+  const unsupportedResponses = asStringArray(response_types).filter((value) => value !== 'code');
+  if (unsupportedResponses.length > 0) {
+    return res.status(400).json({
+      error: 'invalid_client_metadata',
+      error_description:
+        `response_types contains values this server does not support: ${unsupportedResponses.join(', ')}. ` +
+        'Supported: code.',
+    });
+  }
 
   // The registration is carried by the id itself, so nothing is written here.
   // mintClientId validates redirect_uris — count, absoluteness, scheme, and
@@ -776,6 +822,43 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
       );
     }
 
+    // Same distinction as the refresh grant, on the path a ROTATION actually
+    // hits: during one nobody holds a refresh token yet, so everyone is doing a
+    // fresh sign-in and arrives here. `invalid_client` means the platform
+    // rejected OUR credentials — a wrong INSFORGE_CLIENT_SECRET — and telling
+    // the person their sign-in failed sends them round a loop that cannot
+    // terminate, because every retry fails identically until an operator fixes
+    // the config. Max caught this one; I had fixed only the refresh path.
+    if (tokens.error === 'invalid_client' || tokens.error === 'unauthorized_client') {
+      console.error(
+        '[OAuth] The platform rejected OUR client credentials during sign-in. ' +
+          'INSFORGE_CLIENT_ID/SECRET are wrong for this deployment — no user action ' +
+          'can fix this.'
+      );
+      getAnalyticsService().trackOAuthFailure({
+        errorType: 'server_error',
+        errorDescription: 'Platform rejected our client credentials at the callback',
+        endpoint: '/oauth/callback',
+      });
+      res.set('Retry-After', '30');
+      return sendOAuthError(
+        req,
+        res,
+        503,
+        {
+          error: 'temporarily_unavailable',
+          error_description: 'This server cannot complete sign-ins right now.',
+        },
+        {
+          heading: 'Sign-in is temporarily unavailable',
+          message:
+            'This is a problem on our side, not with your account or your editor, and ' +
+            'retrying now will not help. We can see it; try again in a few minutes.',
+          action: undefined,
+        }
+      );
+    }
+
     if (tokens.error || !tokens.access_token) {
       console.error('[OAuth] Token exchange error:', tokens);
       getAnalyticsService().trackOAuthFailure({
@@ -806,7 +889,14 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
     // The token rides inside the state instead of a row keyed by it. The
     // state_id therefore CHANGES here — it is the record, so a record with one
     // more field is a different string.
-    const stateWithToken = oauthManager.attachPlatformToken(authState, tokens.access_token);
+    // The refresh token rides along from here. It arrived in this same response
+    // and was dropped on the floor until now, which is the whole reason a
+    // connected client died after an hour.
+    const stateWithToken = oauthManager.attachPlatformToken(
+      authState,
+      tokens.access_token,
+      tokens.refresh_token
+    );
 
     // Same shape as authorize: the record replaces the cookie, the URL carries
     // only the handle. The handle is unchanged, so the two halves still match.
@@ -948,7 +1038,7 @@ app.post(OAUTH_ENDPOINTS.token, async (req: Request, res: Response) => {
 
     try {
       const oauthManager = getOAuthManager();
-      const { accessToken } = await oauthManager.exchangeCode(
+      const { accessToken, refreshToken } = await oauthManager.exchangeCode(
         code as string,
         redirect_uri as string,
         code_verifier as string | undefined
@@ -972,10 +1062,20 @@ app.post(OAUTH_ENDPOINTS.token, async (req: Request, res: Response) => {
         ? accessTokenLifetimeSeconds(payload)
         : ACCESS_TOKEN_TTL_SECONDS;
 
+      // refresh_token is spread in rather than always present: a code minted
+      // before this shipped carries none, and `refresh_token: undefined` would
+      // serialise the key away anyway — but stating the conditional makes the
+      // absence deliberate rather than incidental. Quinn caught this being
+      // MINTED AND DROPPED one line above: exchangeCode returned it, the
+      // destructure ignored it, and the response omitted it, so discovery
+      // advertised a grant no client could ever obtain the credential for.
+      // Nothing was type-wrong about discarding a returned field, which is why
+      // only a real login found it.
       res.json({
         access_token: accessToken,
         token_type: 'Bearer',
         expires_in: expiresIn,
+        ...(refreshToken ? { refresh_token: refreshToken } : {}),
         scope: 'mcp:read mcp:write',
       });
     } catch (error) {
@@ -991,14 +1091,127 @@ app.post(OAUTH_ENDPOINTS.token, async (req: Request, res: Response) => {
       });
     }
   } else if (grant_type === 'refresh_token') {
-    getAnalyticsService().trackOAuthFailure({
-      errorType: 'unsupported_grant_type',
-      errorDescription: 'Refresh tokens are not supported',
-      endpoint: '/oauth/token',
+    // Until now this answered `unsupported_grant_type`, which is why every
+    // connected client died after an hour: the platform token sealed in our
+    // access token is a ONE-HOUR JWT, we advertise whichever expiry is sooner,
+    // and there was no way back except a browser. For a CLI that is an
+    // annoyance; for a hosted connector signed in once in someone else's
+    // browser it is a broken integration.
+    const { refresh_token } = req.body;
+
+    if (!refresh_token) {
+      return res.status(400).json({
+        error: 'invalid_request',
+        error_description: 'Missing required parameter: refresh_token',
+      });
+    }
+
+    // Null covers expired, forged, and sealed under a rotated secret alike —
+    // deliberately one answer, since a caller able to tell them apart would be
+    // an oracle. All of them mean the same thing to a client: sign in again.
+    const payload = readRefreshToken(refresh_token as string, refreshTokenKey());
+    if (!payload) {
+      getAnalyticsService().trackOAuthFailure({
+        errorType: 'invalid_grant',
+        errorDescription: 'Refresh token is expired or not ours',
+        endpoint: '/oauth/token',
+      });
+      return res.status(400).json({
+        error: 'invalid_grant',
+        error_description: 'This refresh token has expired or is not valid. Sign in again.',
+      });
+    }
+
+    let tokens: PlatformTokens;
+    try {
+      tokens = await refreshPlatformToken({
+        refreshToken: payload.platformRefreshToken,
+        clientId: INSFORGE_CONFIG.clientId,
+        clientSecret: INSFORGE_CONFIG.clientSecret,
+      });
+    } catch (error) {
+      // Could not reach the platform, which is not the client's fault and may
+      // work on the next attempt — the one case here that must NOT tell someone
+      // to sign in again.
+      console.error('[OAuth] Could not reach the platform to refresh:', error);
+      res.set('Retry-After', '5');
+      return res.status(503).json({
+        error: 'temporarily_unavailable',
+        error_description: 'The InsForge platform could not be reached. Try again shortly.',
+      });
+    }
+
+    // The platform declining OUR credentials is not the user's grant expiring,
+    // and collapsing the two is the same mistake as answering "sign in again"
+    // for an unreachable platform — one step further in.
+    //
+    //   {"error":"invalid_client","message":"Invalid client credentials"}  401
+    //
+    // is what it returns when INSFORGE_CLIENT_SECRET is wrong, which is exactly
+    // what a botched rotation or a half-finished client swap produces. Reported
+    // as invalid_grant it tells EVERY connected user to sign in again, they all
+    // do, and every new sign-in fails the same way — a stampede caused by our
+    // config and blamed on their session. Measured against the real platform
+    // rather than assumed.
+    if (tokens.error === 'invalid_client') {
+      console.error(
+        '[OAuth] The platform rejected OUR client credentials on refresh. ' +
+          'INSFORGE_CLIENT_ID/SECRET are wrong for this deployment — this is not the ' +
+          "user's sign-in expiring."
+      );
+      getAnalyticsService().trackOAuthFailure({
+        errorType: 'server_error',
+        errorDescription: 'Platform rejected our client credentials on refresh',
+        endpoint: '/oauth/token',
+      });
+      // Retryable, and deliberately NOT a re-authentication prompt: nothing the
+      // person does fixes our configuration, and asking them to try is how one
+      // bad PATCH becomes a support queue.
+      res.set('Retry-After', '30');
+      return res.status(503).json({
+        error: 'temporarily_unavailable',
+        error_description: 'This server cannot renew sign-ins right now. Try again shortly.',
+      });
+    }
+
+    if (tokens.error || !tokens.access_token) {
+      // The platform answered and declined the GRANT: gone, revoked, or past its
+      // thirty days. That one IS sign in again.
+      getAnalyticsService().trackOAuthFailure({
+        errorType: 'invalid_grant',
+        errorDescription: 'Platform refused the refresh token',
+        endpoint: '/oauth/token',
+      });
+      return res.status(400).json({
+        error: 'invalid_grant',
+        error_description: 'This sign-in can no longer be renewed. Sign in again.',
+      });
+    }
+
+    const accessToken = issueAccessToken(
+      {
+        userId: payload.userId,
+        platformAccessToken: tokens.access_token,
+        projectId: payload.projectId,
+      },
+      accessTokenKey()
+    );
+
+    const refreshed = readAccessToken(accessToken, accessTokenKey());
+    getAnalyticsService().trackOAuthSuccess({
+      clientId: req.body.client_id || 'unknown',
+      scope: 'mcp:read mcp:write',
     });
-    return res.status(400).json({
-      error: 'unsupported_grant_type',
-      error_description: 'Refresh tokens are not supported',
+
+    // The SAME refresh token back, not a new one. The platform keeps its own on
+    // refresh, so ours still names a live grant, and re-sealing would hand the
+    // client a different string for no change in what it authorises.
+    return res.json({
+      access_token: accessToken,
+      token_type: 'Bearer',
+      expires_in: refreshed ? accessTokenLifetimeSeconds(refreshed) : ACCESS_TOKEN_TTL_SECONDS,
+      refresh_token,
+      scope: 'mcp:read mcp:write',
     });
   } else {
     getAnalyticsService().trackOAuthFailure({
@@ -1801,4 +2014,40 @@ async function startServer() {
   }
 }
 
-startServer();
+/**
+ * Start only when this module IS the process entry point.
+ *
+ * Without the guard, importing this file to reach `app` binds the configured
+ * port as a side effect, which is why the route branches had no tests: there was
+ * no way to drive a handler without standing up a real server on a real port.
+ * Two credential guards shipped untested for exactly that reason, and QA proved
+ * it by disabling each in turn and watching the suite stay green.
+ *
+ * Compared against argv[1] through pathToFileURL so the two are the same KIND of
+ * string — `import.meta.url` is a file: URL and argv[1] is a path, and
+ * comparing them directly is a bug that only shows up on the platform whose
+ * separator differs.
+ *
+ * And through realpathSync, which is the part I got wrong first: package.json
+ * publishes this file as the `insforge-mcp-server` bin, npm installs bins as
+ * SYMLINKS, and Node resolves symlinks for `import.meta.url` but not for
+ * argv[1]. So the naive comparison was false when launched by its own installed
+ * name, and the server silently did not start — no error, no log, nothing to
+ * grep for. The container was safe because its start script names the file
+ * directly, which is exactly why testing only that form proved nothing about
+ * the published binary.
+ */
+const entryPath = process.argv[1];
+let isEntryPoint = false;
+if (entryPath) {
+  try {
+    isEntryPoint = import.meta.url === pathToFileURL(realpathSync(entryPath)).href;
+  } catch {
+    // argv[1] naming something unresolvable is not a reason to refuse to boot.
+    isEntryPoint = import.meta.url === pathToFileURL(entryPath).href;
+  }
+}
+
+if (isEntryPoint) {
+  startServer();
+}

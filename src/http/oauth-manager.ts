@@ -1,9 +1,10 @@
 import { createHash, randomBytes } from 'crypto';
 import { sealAuthState, openAuthState, InvalidAuthStateError } from './auth-state.js';
 import { issueAccessToken, readAccessToken } from './access-token.js';
+import { issueRefreshToken } from './refresh-token.js';
 import { getProjectKeyCache } from './project-key-cache.js';
 import { newStateHandle } from './auth-state-cookie.js';
-import { authStateKey, authCodeKey, accessTokenKey } from './config.js';
+import { authStateKey, authCodeKey, accessTokenKey, refreshTokenKey } from './config.js';
 import { isAuthorizationRefusal } from './error-status.js';
 import {
   validateToken,
@@ -83,6 +84,18 @@ interface AuthorizationState {
    */
   platformAccessToken?: string;
 
+  /**
+   * The platform REFRESH token, from the same exchange.
+   *
+   * Read into a response type and dropped, until now — which is why every
+   * connected client dies after an hour: the token beside this one is a
+   * one-hour JWT and nothing existed to renew it. Safe here for the same reason
+   * as its neighbour, and it needs that reason more: this envelope is
+   * encrypted, and this is the longer-lived of the two credentials by thirty
+   * days to one hour.
+   */
+  platformRefreshToken?: string;
+
   createdAt: number;
 }
 
@@ -117,8 +130,15 @@ export class OAuthManager {
    * 10-minute TTL from the moment the callback wrote it, and the person still
    * has a project to choose.
    */
-  attachPlatformToken(authState: AuthorizationState, platformAccessToken: string): string {
-    return sealAuthState({ ...authState, platformAccessToken }, authStateKey());
+  attachPlatformToken(
+    authState: AuthorizationState,
+    platformAccessToken: string,
+    platformRefreshToken?: string
+  ): string {
+    return sealAuthState(
+      { ...authState, platformAccessToken, platformRefreshToken },
+      authStateKey()
+    );
   }
 
   /**
@@ -223,6 +243,26 @@ export class OAuthManager {
       accessTokenKey()
     );
 
+    // Ours, sealed here rather than at the token endpoint, so the code carries
+    // two tokens of OURS instead of one of ours beside a raw platform
+    // credential. The values it needs — user and project — are in scope at this
+    // point and nowhere later, so building it anywhere else would mean
+    // forwarding them for no reason.
+    //
+    // Undefined when the platform sent no refresh token: an older platform, or
+    // a grant that does not issue one. That is a client without renewal, which
+    // is exactly today's behaviour, rather than an error.
+    const refreshToken = authState.platformRefreshToken
+      ? issueRefreshToken(
+          {
+            userId: user.id,
+            platformRefreshToken: authState.platformRefreshToken,
+            projectId: projectAccess.projectId,
+          },
+          refreshTokenKey()
+        )
+      : undefined;
+
     // No binding row: the access token IS the record. See access-token.ts for
     // why the platform token goes in and the project API key deliberately does
     // not.
@@ -253,6 +293,7 @@ export class OAuthManager {
     const code = sealAuthState(
       {
         accessToken,
+        refreshToken,
         redirectUri: authState.redirectUri,
         codeChallenge: authState.codeChallenge,
         codeChallengeMethod: authState.codeChallengeMethod,
@@ -284,11 +325,12 @@ export class OAuthManager {
     code: string,
     redirectUri: string,
     codeVerifier?: string
-  ): Promise<{ accessToken: string }> {
+  ): Promise<{ accessToken: string; refreshToken?: string }> {
     // No GETDEL, because there is nothing stored. Replay is bounded by PKCE
     // (required at issue time) and by the five-minute expiry sealed inside.
     let payload: {
       accessToken: string;
+      refreshToken?: string;
       redirectUri: string;
       codeChallenge?: string;
       codeChallengeMethod?: string;
@@ -299,7 +341,7 @@ export class OAuthManager {
       throw new Error('Invalid or expired authorization code');
     }
 
-    const { accessToken, redirectUri: storedRedirectUri, codeChallenge, codeChallengeMethod } = payload;
+    const { accessToken, refreshToken, redirectUri: storedRedirectUri, codeChallenge, codeChallengeMethod } = payload;
 
     // Validate redirect URI
     if (redirectUri !== storedRedirectUri) {
@@ -332,7 +374,7 @@ export class OAuthManager {
       }
     }
 
-    return { accessToken };
+    return { accessToken, refreshToken };
   }
   /**
    * Everything a tool call needs, from the token alone plus one cached lookup.
