@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.InsForge%2Finsforge-mcp.svg)](https://mcptoplist.com/server/io.github.InsForge%2Finsforge-mcp)
+
 <div align="center">
   <a href="https://insforge.dev">
     <img src="banner.png" alt="Insforge Banner">
