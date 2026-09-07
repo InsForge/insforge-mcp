@@ -60,8 +60,9 @@
     "zod": "^3.23.8"
   },
   "overrides": {
+    "@humanfs/node": "^0.16.8",
     "brace-expansion": "^5.0.9",
-    "fast-uri": "^3.1.5",
+    "fast-uri": "^3.1.6",
     "glob": "^10.5.0",
     "ip-address": "^10.5.0",
     "minimatch": "^9.0.7",
@@ -69,7 +70,7 @@
     "hono": "^4.12.31",
     "lodash": "^4.18.0",
     "postcss": "^8.5.26",
-    "qs": "^6.15.2",
+    "qs": "^6.16.0",
     "rollup": "^4.59.0",
     "esbuild": "^0.28.1"
   },
