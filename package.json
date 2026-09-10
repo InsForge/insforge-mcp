@@ -67,7 +67,7 @@
     "ip-address": "^10.5.0",
     "minimatch": "^9.0.7",
     "@hono/node-server": "^1.19.13",
-    "hono": "^4.12.31",
+    "hono": "^4.13.5",
     "lodash": "^4.18.0",
     "postcss": "^8.5.26",
     "qs": "^6.16.0",
@@ -79,7 +79,7 @@
     "@types/archiver": "^7.0.0",
     "@types/express": "^5.0.3",
     "@types/node": "^20.10.5",
-    "@vitest/coverage-v8": "^4.1.0",
+    "@vitest/coverage-v8": "^4.1.11",
     "eslint": "^10.0.3",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.5",
@@ -90,6 +90,6 @@
     "typescript": "^5.3.3",
     "typescript-eslint": "^8.57.1",
     "vite": "^8.1.5",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.11"
   }
 }
