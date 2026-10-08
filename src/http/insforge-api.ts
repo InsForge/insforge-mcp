@@ -365,8 +365,9 @@ type ProjectWithDomain = Project & { customized_domain?: string };
  * Format: https://{appkey}.{region}.insforge.app
  */
 export function buildAccessHost(project: Project): string {
-  if ((project as ProjectWithDomain).customized_domain) {
-    return `https://${(project as ProjectWithDomain).customized_domain}`;
+  const { customized_domain } = project as ProjectWithDomain;
+  if (customized_domain) {
+    return `https://${customized_domain}`;
   }
 
   return `https://${project.appkey}.${project.region}.insforge.app`;

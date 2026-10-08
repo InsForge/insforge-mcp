@@ -1,11 +1,6 @@
 import type { Response } from 'express';
 import { SERVER_CONFIG, OAUTH_ENDPOINTS, normaliseBaseUrl } from './config.js';
 
-// Every URL below is normalised, even when a caller passes its own publicUrl:
-// a trailing slash would produce `https://host//.well-known/...`, which no
-// route matches and which a client cannot reconcile with the document's
-// `resource` value.
-
 /**
  * Where the protected-resource metadata for a given endpoint lives.
  *
@@ -14,6 +9,11 @@ import { SERVER_CONFIG, OAUTH_ENDPOINTS, normaliseBaseUrl } from './config.js';
  * https://host/mcp lives at
  * https://host/.well-known/oauth-protected-resource/mcp — not at the bare
  * well-known path. Pass an empty string for the origin itself.
+ *
+ * The base URL is normalised here and in `protectedResourceMetadata`, even
+ * when a caller passes its own publicUrl: a trailing slash would produce
+ * `https://host//.well-known/...`, which no route matches and which a client
+ * cannot reconcile with the document's `resource` value.
  */
 export function protectedResourceMetadataUrl(
   resourcePath = '',

@@ -248,10 +248,15 @@ export class OAuthManager {
     );
 
     // The state was never stored, so it stays acceptable until its own expiry:
-    // a sealed state is replayable inside its ten minutes. The bound on that is
-    // the platform: a replay re-presents an authorization code the platform has
-    // already consumed, and it refuses, so a replay fails at the exchange and
-    // cannot mint a second session.
+    // a sealed state is replayable inside its ten minutes. Which hop that
+    // reaches depends on what is replayed. The callback re-presents the
+    // platform's authorization code, which the platform has already consumed,
+    // so that replay fails there. This step runs on the platform access token
+    // the callback sealed into the state, which the platform still honours, so
+    // a replayed project selection mints a second code. What bounds that: the
+    // replayer must hold the sealed cookie, server.ts clears it when the flow
+    // completes, and the second code is redeemable only with the verifier of
+    // the client that started the flow.
     return code;
   }
 
