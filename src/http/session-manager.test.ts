@@ -44,7 +44,6 @@ function fakeRuntime(transportType: 'streamable' | 'sse' = 'streamable', ageOffs
   };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function seed(
   manager: any,
   ids: string[],

@@ -52,17 +52,8 @@ interface ToolVersionRequirement {
  * - Not in map - Available for all versions
  */
 const TOOL_VERSION_REQUIREMENTS: Record<string, ToolVersionRequirement> = {
-  // Schedule tools - require backend v1.1.1+
-  // 'upsert-schedule': { minVersion: '1.1.1' },
-  // 'delete-schedule': { minVersion: '1.1.1' },
-  // 'get-schedules': { minVersion: '1.1.1' },
-  // 'get-schedule-logs': { minVersion: '1.1.1' },
-
   'create-deployment': { minVersion: '1.4.7' },
   'fetch-sdk-docs': { minVersion: '1.5.1' },
-
-  // Example of a deprecated tool (uncomment when needed):
-  // 'legacy-tool': { minVersion: '1.0.0', maxVersion: '1.5.0' },
 };
 
 /**

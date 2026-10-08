@@ -71,23 +71,12 @@ export class InsforgeApiError extends Error {
 /**
  * How long we wait for the platform before calling it unreachable.
  *
- * Every call in this file had NO timeout, and that quietly made the 503 path
- * unreachable in the case it was written for. Measured against a socket that
- * accepts the connection and never answers — the shape an overloaded service
- * actually takes:
- *
- *   no timeout   still hanging at 30s   (undici's default headersTimeout is 300s)
- *
- * Cloudflare gives up at 100s and the MCP client long before that, so a stalled
- * platform produced a gateway timeout — never our "temporarily_unavailable"
- * with a Retry-After. The distinction between "refused" and "could not tell"
- * only exists if we find out promptly which one it is.
- *
- * So a failure has to be FAST as well as classified. 10s matches the one place
- * that already had a bound (the backend version check in the tool registrar) and
- * is comfortably inside every proxy in the chain. Note this is on the request
- * path for a cache miss, so it is also the worst case a user waits before being
- * told to retry.
+ * Without a bound, a socket that accepts and never answers hangs until undici's
+ * 300s headersTimeout; Cloudflare gives up at 100s and the MCP client long
+ * before that, so a stalled platform surfaced as a gateway timeout rather than
+ * our "temporarily_unavailable" with a Retry-After. 10s is comfortably inside
+ * every proxy in the chain. It is on the request path for a cache miss, so it
+ * is also the worst case a user waits before being told to retry.
  *
  * AbortSignal.timeout throws a TimeoutError, which is not an InsforgeApiError —
  * so isAuthorizationRefusal() reads it as "could not tell" and it becomes a 503.
@@ -99,28 +88,21 @@ const PLATFORM_TIMEOUT_MS = 10_000;
 /**
  * The platform has TWO path families, and guessing costs you a 404.
  *
- * Measured against api.insforge.dev rather than inferred from the neighbours:
+ * Measured against api.insforge.dev:
  *
  *   /auth/v1/profile         401   <- reachable      /api/auth/v1/profile      404
  *   /api/oauth/v1/revoke     401   <- reachable      /oauth/v1/revoke          404
  *
- * So user/org/project routes sit at the root and the OAuth routes sit under
- * `/api`. I got this wrong writing revokePlatformToken — it called
- * `/oauth/v1/revoke`, which 404s, so the revoke would have failed every single
- * time against the real platform while passing every local test.
- *
- * It passed because my stub matched `req.url.includes('/oauth/v1/revoke')`,
- * which is true of both paths. A stub that substring-matches cannot catch a
- * path error; the only thing that could was asking the real host. Hence this
- * constant, so the two families are named once instead of being retyped per
- * call site.
+ * User/org/project routes sit at the root and the OAuth routes sit under
+ * `/api`. A stub that substring-matches cannot catch a path error, so every
+ * OAuth URL must be built from this constant rather than a retyped prefix;
+ * platform-paths.test.ts enforces that.
  */
 const OAUTH_API_BASE = `${INSFORGE_API_BASE}/api/oauth/v1`;
 
 /**
  * Every outbound call to the platform goes through this, so a new one cannot be
- * added without a bound. That is the actual defect being fixed: not a missing
- * timeout in one place, but six places each free to forget.
+ * added without a bound.
  */
 function platformFetch(url: string, init: Parameters<typeof fetch>[1] = {}) {
   return fetch(url, { ...init, signal: AbortSignal.timeout(PLATFORM_TIMEOUT_MS) });
@@ -249,17 +231,12 @@ export async function getProjectApiKey(token: string, projectId: string): Promis
 /**
  * Revoke a platform access token upstream (RFC 7009).
  *
- * This is what makes OUR /oauth/revoke mean something. With the token binding
- * gone, dropping our cached project key only forces one re-fetch — the sealed
- * bearer still carries a live platform token, so the very next request works
- * again and the credential stays usable for its full 24 hours. A revoke that
- * returns 200 and changes nothing is the worst kind of security control: the
- * person who called it believes the leak is closed.
+ * This is what makes OUR /oauth/revoke mean something: dropping our cached
+ * project key alone only forces one re-fetch, because the sealed bearer still
+ * carries a live platform token. The endpoint takes our client id with no
+ * client secret:
  *
- * So revoke the thing that actually grants access. Iris confirmed the endpoint
- * is deployed and takes our client id with no client secret:
- *
- *   POST /oauth/v1/revoke  { token, token_type_hint, client_id }
+ *   POST /api/oauth/v1/revoke  { token, token_type_hint, client_id }
  *   our client_id      -> 200 {"success":true}
  *   unknown client_id  -> 401 invalid_client
  *
@@ -298,23 +275,9 @@ export interface PlatformTokens {
 /**
  * Exchange an authorization code for platform tokens.
  *
- * This lived in server.ts, doing its own bare `fetch`, and that placement was
- * the whole defect rather than an accident of style. When I wrapped the calls
- * in this file with a timeout I wrote "every outbound call to the platform goes
- * through this" — true of this file, false of the server, and this is the call
- * it missed. Iris found it by forcing the platform unroutable on a branch env:
- *
- *   platform reachable    callback -> 400 invalid_grant     (the platform's answer)
- *   platform unroutable   callback -> 500 "fetch failed"    no Retry-After
- *
- * `fetch failed` is Node's raw message rendered to whoever is looking, and this
- * is the ONE upstream call that renders in a human's browser mid-sign-in. So it
- * was both the least classified and the most visible.
- *
- * Moving it here rather than adding a timeout where it stood: a call that lives
- * beside its siblings inherits their bound automatically, and the next person
- * adding a platform call finds them all in one file. The fix for "six places
- * free to forget" cannot itself be a seventh place to remember.
+ * Lives here beside its siblings so it inherits their timeout: this is the ONE
+ * upstream call that renders in a human's browser mid-sign-in, so an unbounded
+ * or unclassified failure here shows Node's raw "fetch failed" to a person.
  *
  * Throws InsforgeApiError for a platform response we could not read, and
  * returns the parsed body otherwise — INCLUDING an OAuth error body, because
@@ -394,17 +357,18 @@ export async function refreshPlatformToken(params: {
   }
 }
 
+/** The platform sets this only for projects with a custom domain; it is not part of the Project shape above. */
+type ProjectWithDomain = Project & { customized_domain?: string };
+
 /**
  * Build the access host URL for a project
  * Format: https://{appkey}.{region}.insforge.app
  */
 export function buildAccessHost(project: Project): string {
-  // Check if project has a customized domain
-  if ((project as any).customized_domain) {
-    return `https://${(project as any).customized_domain}`;
+  if ((project as ProjectWithDomain).customized_domain) {
+    return `https://${(project as ProjectWithDomain).customized_domain}`;
   }
 
-  // Standard format: https://{appkey}.{region}.insforge.app
   return `https://${project.appkey}.${project.region}.insforge.app`;
 }
 

@@ -296,10 +296,6 @@ export const SSE_KEEPALIVE_MS = positiveIntEnv(process.env.MCP_SSE_KEEPALIVE_MS,
  */
 export const SESSION_SWEEP_MS = positiveIntEnv(process.env.MCP_SESSION_SWEEP_MS, 5 * 60 * 1000);
 
-// SESSION_CONFIG is gone with the store it described: its `ttl` was a duplicate
-// of the one in session-manager.ts and its `keyPrefix` named Redis keys that no
-// longer exist. Two constants for one timeout is how they drift apart.
-
 // ============================================================================
 // Analytics Configuration
 // ============================================================================

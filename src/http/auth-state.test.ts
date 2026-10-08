@@ -1,5 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { createHmac } from 'crypto';
 import { sealAuthState, openAuthState, InvalidAuthStateError, AUTH_STATE_TTL_SECONDS } from './auth-state.js';
 import { deriveAuthStateKey, deriveClientIdSigningKey } from './config.js';
 
