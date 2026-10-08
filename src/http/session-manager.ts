@@ -25,44 +25,18 @@ export function sessionFingerprint(sessionId: string | undefined | null): string
 }
 
 /**
- * Sessions, and the honest limit of "stateless".
+ * Sessions are the one piece of state here that cannot become a value.
  *
- * Every other piece of state in this server became a value: a client
- * registration is a signed id, an authorization state is a sealed cookie, an
- * authorization code and an access token are sealed envelopes. All of them were
- * derived data pretending to be storage, so carrying them in the artefact that
- * travels removed the store entirely.
+ * An MCP session owns an `McpServer` and a live transport — for a streaming
+ * client, an OPEN TCP CONNECTION held by one process. A socket cannot be sealed
+ * into a token or copied to another machine, so sessions live in this process
+ * only.
  *
- * A session is NOT that, and it is worth being exact about why rather than
- * finishing the sweep and calling the server stateless.
- *
- * An MCP session owns an `McpServer` and a live `StreamableHTTPServerTransport`
- * — a registered tool set and, for a streaming client, an OPEN TCP CONNECTION
- * held by one process. A connection cannot be sealed into a token, because the
- * thing being persisted is not information: it is a socket. No amount of
- * cryptography moves it to another machine.
- *
- * So Redis was never making sessions stateless either. It stored a copy of the
- * data BESIDE the connection, and `restoreSession` rebuilt a new server and
- * transport around a REUSED session id. That works only for a client that
- * reconnects with a POST, which is also precisely the client that could just as
- * well re-initialize. It bought us:
- *
- *   a session id surviving a restart      real, but only for POSTing clients
- *   sharing sessions across instances     never used: one instance, and the
- *                                         transport is not shareable anyway
- *   an expiry clock                       replaced here by the idle sweep
- *
- * against a hard dependency in the request path of every tool call. That is a
- * bad trade at one instance, and it is the last thing keeping Redis alive.
- *
- * WHAT THIS COSTS, stated plainly: a restart drops every live session. The
- * client's recovery is to see 404 on its session id and initialize again — the
- * protocol's own answer, and what the SDK's own server does. It is a real
- * regression for anyone mid-stream, and it is the price of the dependency going
- * away. If we later run more than one instance, the answer is sticky routing or
- * a shared transport layer, NOT a session copy in Redis: that copy never made
- * the connection portable.
+ * WHAT THIS COSTS: a restart drops every live session. The client's recovery is
+ * to see 404 on its session id and initialize again — the protocol's own
+ * answer, and what the SDK's own server does. If we later run more than one
+ * instance, the answer is sticky routing or a shared transport layer, NOT a
+ * session copy in a store: a copy never makes the connection portable.
  */
 
 /**
@@ -92,22 +66,14 @@ export interface SessionData {
   backendVersion?: string;
 }
 
-/**
- * One session: the live instances, and the data that describes them.
- *
- * These used to live in two places — instances in a Map, data in Redis — and
- * the split was the source of every subtlety in the sweep below, because the
- * two halves could disagree about whether a session existed. One entry cannot
- * disagree with itself.
- */
+/** One session: the live instances, and the data that describes them. */
 interface RuntimeSession {
   server: McpServer;
   transport: StreamableHTTPServerTransport | SSEServerTransport;
   transportType: 'streamable' | 'sse';
   data: SessionData;
   // Last time this process saw real client traffic for the session, on the
-  // monotonic clock. This is now the ONLY clock: it decides when an idle
-  // session is collected.
+  // monotonic clock. This decides when an idle session is collected.
   lastSeenAt: number;
   // Server->client streams currently open for this session (GET /mcp). A stream
   // is activity that leaves no other trace: it produces no requests, so nothing
@@ -125,12 +91,12 @@ export const SESSION_TTL_MS = SESSION_TTL * 1000;
  * Clock for in-memory session ages.
  *
  * Deliberately monotonic rather than Date.now(). These timestamps are only
- * ever compared against each other to measure elapsed time, never against
- * anything Redis stores, so wall-clock accuracy buys nothing — while a
- * forward clock step (NTP correction, a VM resuming from suspend) would age
- * every live session past its TTL at once and hand the sweep the exact
- * conclusion this gate exists to prevent. CLOCK_MONOTONIC can only lag real
- * elapsed time, which errs toward holding a session too long.
+ * ever compared against each other to measure elapsed time, so wall-clock
+ * accuracy buys nothing — while a forward clock step (NTP correction, a VM
+ * resuming from suspend) would age every live session past its TTL at once
+ * and hand the sweep the exact conclusion this gate exists to prevent.
+ * CLOCK_MONOTONIC can only lag real elapsed time, which errs toward holding a
+ * session too long.
  */
 export function monotonicNow(): number {
   return performance.now();
@@ -143,31 +109,6 @@ export interface SweepCandidate {
   openStreams: number;
 }
 
-/**
- * Pick the sessions that have gone idle for longer than the TTL.
- *
- * This used to take a second argument: the pipelined EXISTS reply saying
- * whether Redis still held a record. Every subtlety it carried came from having
- * two clocks that could disagree —
- *
- *   Redis expires a record early (restart, cold failover, eviction) and every
- *   resident session reads as an orphan at once, so the sweep closes live
- *   connections. The in-memory clock was the gate that stopped it.
- *
- * — and with one clock there is nothing to disagree with. The gate that
- * remains is the one that was doing the real work all along: a session is
- * collectable when nobody has talked to it for SESSION_TTL_MS.
- *
- * Deleting the `exists` term is therefore not a loosening. It removes the
- * failure mode it was written to defend against, and what is left is strictly
- * the stricter of the two conditions.
- *
- * An open server->client stream still counts as alive on its own, and that part
- * is NOT redundant. It is the one form of activity that stamps no clock: the
- * client holds GET /mcp open and may send no requests at all, so lastSeenAt
- * stays frozen at the moment the stream opened while the client is plainly
- * still connected.
- */
 /**
  * May this request use this session?
  *
@@ -220,6 +161,15 @@ export function sessionAcceptsCredential(
   return presentedTokenHash === storedTokenHash;
 }
 
+/**
+ * Pick the sessions that have gone idle for longer than the TTL.
+ *
+ * An open server->client stream counts as alive on its own, and that is NOT
+ * redundant with the clock: it is the one form of activity that stamps no
+ * clock. The client holds GET /mcp open and may send no requests at all, so
+ * lastSeenAt stays frozen at the moment the stream opened while the client is
+ * plainly still connected.
+ */
 export function selectOrphanedSessions(
   sessions: SweepCandidate[],
   now: number = monotonicNow()
@@ -281,20 +231,15 @@ export class SessionManager {
   // Every session this process holds. The only session store there is.
   private runtimeSessions = new Map<string, RuntimeSession>();
 
-  // Periodic reaper for sessions nobody is using any more. No longer optional:
-  // when Redis held the records, its TTL expired them and this only dropped the
-  // instances left behind. Now this timer IS session expiry, so a server that
-  // does not start it leaks every session it ever creates.
+  // Periodic reaper for sessions nobody is using any more. This timer IS
+  // session expiry: a server that does not start it leaks every session it
+  // ever creates.
   private sweepTimer?: NodeJS.Timeout;
 
   /**
-   * Create a new session.
-   *
-   * Still connect-first: the transport connection is established before the
-   * session is recorded, so a failed connect leaves nothing behind. That was
-   * written to avoid orphaned Redis records and it earns its keep unchanged —
-   * an entry in the map with a dead transport is the same bug without the round
-   * trip.
+   * Create a new session. Connect-first: the transport is connected before the
+   * session is recorded, so a failed connect leaves no entry with a dead
+   * transport behind.
    */
   async createSession(
     sessionId: string,
@@ -303,7 +248,6 @@ export class SessionManager {
   ): Promise<McpServer> {
     const now = Date.now();
 
-    // Create MCP server and register tools first
     const server = new McpServer({
       name: 'insforge-mcp',
       version: PACKAGE_VERSION,
@@ -317,8 +261,6 @@ export class SessionManager {
       accessToken: sessionData.oauthTokenHash,
     });
 
-    // Connect the server to the transport before recording the session, so a
-    // failed connect leaves nothing behind.
     await server.connect(transport);
 
     const fullSessionData: SessionData = {
@@ -341,22 +283,9 @@ export class SessionManager {
     return server;
   }
 
-  /**
-   * The data half of a session, or null.
-   *
-   * Synchronous now, and that is the whole shape of this change: it used to be
-   * a network round trip on the path of every request that carried a session
-   * id.
-   */
+  /** The data half of a session, or null. */
   getSessionData(sessionId: string): SessionData | null {
     return this.runtimeSessions.get(sessionId)?.data ?? null;
-  }
-
-  /**
-   * Get runtime session (transport + server) from memory
-   */
-  getRuntimeSession(sessionId: string): RuntimeSession | null {
-    return this.runtimeSessions.get(sessionId) || null;
   }
 
   /**
@@ -383,16 +312,7 @@ export class SessionManager {
     return { server: session.server, transport: session.transport as SSEServerTransport };
   }
 
-  /**
-   * Does this process hold this session?
-   *
-   * There is no longer any other place it could be, which is why
-   * `restoreSession` is gone rather than shrunk. It rebuilt a server and
-   * transport from a Redis record around a reused session id; with no record,
-   * the honest answer to an unknown id is 404 and the client initializes again.
-   * A method that could only ever return null would just move that decision
-   * somewhere less visible.
-   */
+  /** Does this process hold this session? There is nowhere else it could be. */
   hasSession(sessionId: string): boolean {
     return this.runtimeSessions.has(sessionId);
   }
@@ -409,7 +329,6 @@ export class SessionManager {
   ): Promise<McpServer> {
     const now = Date.now();
 
-    // Create MCP server and register tools first
     const server = new McpServer({
       name: 'insforge-mcp',
       version: PACKAGE_VERSION,
@@ -423,7 +342,7 @@ export class SessionManager {
       accessToken: sessionData.oauthTokenHash,
     });
 
-    // Note: Type assertion needed due to SDK type compatibility issue
+    // The SDK's SSE transport type does not satisfy connect()'s parameter type.
     await server.connect(transport as unknown as Parameters<typeof server.connect>[0]);
 
     const fullSessionData: SessionData = {
@@ -446,9 +365,6 @@ export class SessionManager {
     return server;
   }
 
-  /**
-   * Update last accessed time and refresh TTL
-   */
   /**
    * Register a server->client stream as open, and stamp the session.
    *
@@ -545,13 +461,10 @@ export class SessionManager {
 
     const selected = selectOrphanedSessions(candidates);
 
-    // Re-check each one against the live entry immediately before closing it.
-    //
-    // This mattered more when a Redis round trip sat between the snapshot and
-    // the decision, and it is KEPT rather than removed with the round trip: the
-    // loop below awaits deleteSession for each id, so a request can still land
-    // between the snapshot and this session's turn. Acting on the snapshot
-    // would close a session that has just proved it is alive.
+    // Re-check each one against the live entry immediately before closing it:
+    // the loop awaits deleteSession for each id, so a request can land between
+    // the snapshot and this session's turn, and acting on the snapshot would
+    // close a session that has just proved it is alive.
     const orphaned: string[] = [];
     for (const sessionId of selected) {
       const current = this.runtimeSessions.get(sessionId);
@@ -573,12 +486,8 @@ export class SessionManager {
 
   /**
    * Start the periodic sweep. Idempotent; the timer is unref'd so it never
-   * holds the process open on shutdown.
-   *
-   * This is now the ONLY thing that expires a session. It used to be gated on
-   * Redis being configured, which was correct then — Redis owned the lifetime
-   * and this only reclaimed the instances left behind — and would be a memory
-   * leak now. The gate is gone from the caller for exactly that reason.
+   * holds the process open on shutdown. This is the ONLY thing that expires a
+   * session, so the caller must not gate it on anything.
    */
   startIdleSweep(intervalMs: number = SESSION_SWEEP_MS): void {
     if (this.sweepTimer) {
@@ -626,20 +535,11 @@ export class SessionManager {
   /**
    * Session statistics for /health.
    *
-   * Both numbers are kept, and they are now necessarily equal — there is one
-   * store, so there is nothing for them to disagree about. The pair used to
-   * mean something: `activeSessions` counted Redis records and
-   * `memorySessionCount` counted resident instances, and a ratio far from 1 was
-   * the signal that instances were piling up behind expired records. That is
-   * the leak the sweep exists to prevent, and it can no longer be detected this
-   * way.
-   *
-   * They stay because /health is a published shape that a monitor reads, and
-   * silently dropping a field breaks the reader rather than telling it. What
-   * replaces the ratio as a leak signal is `memorySessionCount` against heap —
-   * measured at roughly 252 kB per session against this machine's ~493 MB heap
-   * limit, so about 2,000 resident sessions is where the process dies. That
-   * number belongs in whatever ends up watching this endpoint.
+   * The two fields are necessarily equal — there is one store — but /health is
+   * a published shape that a monitor reads, so neither may be dropped. The
+   * leak signal is `memorySessionCount` against heap: roughly 252 kB per
+   * session against a ~493 MB heap limit, so about 2,000 resident sessions is
+   * where the process dies.
    */
   getStats(): {
     activeSessions: number;

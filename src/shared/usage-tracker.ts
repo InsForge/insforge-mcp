@@ -72,10 +72,8 @@ export class UsageTracker {
   }
 
   private async reportAgentConnected(): Promise<void> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const body: Record<string, any> = { client: 'mcp' };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const headers: Record<string, any> = { 'Content-Type': 'application/json' };
+    const body: Record<string, string> = { client: 'mcp' };
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 
     if (this.isRemote && this.projectId && this.projectId !== 'legacy') {
       body.project_id = this.projectId;

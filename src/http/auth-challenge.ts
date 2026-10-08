@@ -1,15 +1,5 @@
 import type { Response } from 'express';
-import { SERVER_CONFIG, OAUTH_ENDPOINTS } from './config.js';
-
-/**
- * A configured public URL with a trailing slash would otherwise produce
- * `https://host//.well-known/...`, which no route matches and which a client
- * cannot reconcile with the document it receives. Normalise once, here, so
- * every derived URL and every `resource` value agrees.
- */
-function origin(publicUrl: string): string {
-  return publicUrl.replace(/\/+$/, '');
-}
+import { SERVER_CONFIG, OAUTH_ENDPOINTS, normaliseBaseUrl } from './config.js';
 
 /**
  * Where the protected-resource metadata for a given endpoint lives.
@@ -19,12 +9,17 @@ function origin(publicUrl: string): string {
  * https://host/mcp lives at
  * https://host/.well-known/oauth-protected-resource/mcp — not at the bare
  * well-known path. Pass an empty string for the origin itself.
+ *
+ * The base URL is normalised here and in `protectedResourceMetadata`, even
+ * when a caller passes its own publicUrl: a trailing slash would produce
+ * `https://host//.well-known/...`, which no route matches and which a client
+ * cannot reconcile with the document's `resource` value.
  */
 export function protectedResourceMetadataUrl(
   resourcePath = '',
   publicUrl: string = SERVER_CONFIG.publicUrl
 ): string {
-  return `${origin(publicUrl)}${OAUTH_ENDPOINTS.protectedResource}${resourcePath}`;
+  return `${normaliseBaseUrl(publicUrl)}${OAUTH_ENDPOINTS.protectedResource}${resourcePath}`;
 }
 
 /**
@@ -41,8 +36,8 @@ export function protectedResourceMetadata(
   publicUrl: string = SERVER_CONFIG.publicUrl
 ): Record<string, unknown> {
   return {
-    resource: `${origin(publicUrl)}${resourcePath}`,
-    authorization_servers: [origin(publicUrl)],
+    resource: `${normaliseBaseUrl(publicUrl)}${resourcePath}`,
+    authorization_servers: [normaliseBaseUrl(publicUrl)],
     scopes_supported: ['mcp:read', 'mcp:write'],
   };
 }

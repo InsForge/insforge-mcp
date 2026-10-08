@@ -10,10 +10,8 @@ import {
   validateToken,
   getProjectAccess,
   getAllUserProjects,
-  type ProjectAccess,
   type Organization,
   type Project,
-  InsforgeApiError,
 } from './insforge-api.js';
 
 // ============================================================================
@@ -35,13 +33,6 @@ export function generateCodeChallenge(verifier: string): string {
 }
 
 /**
- * Generate random state for CSRF protection
- */
-export function generateState(): string {
-  return randomBytes(16).toString('hex');
-}
-
-/**
  * OAuth authorization state, sealed into a cookie rather than stored
  * Used during the OAuth flow before token exchange
  *
@@ -57,12 +48,9 @@ interface AuthorizationState {
    */
   handle: string;
 
-  // Original MCP client request.
-  //
-  // clientId is deliberately NOT here. Nothing read it after authorize, and it
-  // is the largest field by far — a signed client id is ~171 characters and may
-  // be up to 4096, which is what pushed the sealed envelope past a 4096-byte
-  // cookie.
+  // Original MCP client request. clientId is deliberately NOT here: nothing
+  // reads it after authorize, and at up to 4096 characters it pushes the sealed
+  // envelope past the 4096-byte cookie bound.
   redirectUri: string;
   scope: string;
   state?: string;
@@ -74,25 +62,15 @@ interface AuthorizationState {
 
   /**
    * The platform access token, present only AFTER the callback has exchanged
-   * the code for it.
-   *
-   * It used to live in its own Redis row (mcp:oauth:token:<state>) read twice
-   * by the project-selection page. Folding it into the state it was already
-   * keyed by removes the row and the second lookup — and it is safe here for
-   * exactly one reason: this envelope is encrypted, not signed. A bearer token
-   * in a signed-but-readable blob would be a bearer token in a URL.
+   * the code for it. Safe here only because this envelope is encrypted, not
+   * signed: a bearer token in a readable blob would be a bearer token in a URL.
    */
   platformAccessToken?: string;
 
   /**
-   * The platform REFRESH token, from the same exchange.
-   *
-   * Read into a response type and dropped, until now — which is why every
-   * connected client dies after an hour: the token beside this one is a
-   * one-hour JWT and nothing existed to renew it. Safe here for the same reason
-   * as its neighbour, and it needs that reason more: this envelope is
-   * encrypted, and this is the longer-lived of the two credentials by thirty
-   * days to one hour.
+   * The platform REFRESH token, from the same exchange. Safe here for the same
+   * reason as its neighbour, and it needs that reason more: it outlives the
+   * access token by thirty days to one hour.
    */
   platformRefreshToken?: string;
 
@@ -111,24 +89,15 @@ export function hashToken(token: string): string {
 }
 
 /**
- * Generate a random code
- */
-function generateCode(): string {
-  return randomBytes(32).toString('base64url');
-}
-
-/**
  * OAuthManager handles the OAuth authorization flow and token-to-project binding
  */
 export class OAuthManager {
   /**
    * Re-seal an existing state with the platform token attached.
    *
-   * Returns a NEW state_id: the sealed value IS the record, so adding a field
-   * necessarily produces a different string. The expiry restarts here, which
-   * matches what it replaces — the Redis token row carried its own fresh
-   * 10-minute TTL from the moment the callback wrote it, and the person still
-   * has a project to choose.
+   * Returns a NEW sealed value: the sealed value IS the record, so adding a
+   * field necessarily produces a different string. The expiry restarts here;
+   * the person still has a project to choose.
    */
   attachPlatformToken(
     authState: AuthorizationState,
@@ -158,11 +127,9 @@ export class OAuthManager {
       throw new Error(`Unsupported code_challenge_method: ${params.codeChallengeMethod}. Only S256 is supported.`);
     }
 
-    // Generate PKCE verifier for our request to Insforge
     const insforgeCodeVerifier = generateCodeVerifier();
     const insforgeCodeChallenge = generateCodeChallenge(insforgeCodeVerifier);
 
-    // Normalize codeChallengeMethod to S256 if code challenge is provided
     const handle = newStateHandle();
     const authState: AuthorizationState = {
       ...params,
@@ -187,9 +154,8 @@ export class OAuthManager {
     // "expired" from "forged" would be an oracle for whoever is probing.
     try {
       const state = openAuthState<AuthorizationState>(sealed, authStateKey());
-      // Required, not optional. An optional handle means a future caller can
-      // drop the CSRF binding with no compile error — john-bot's note, and the
-      // right fix is the signature rather than a comment asking nicely.
+      // expectedHandle is required, not optional: an optional one would let a
+      // caller drop the CSRF binding with no compile error.
       if (state.handle !== expectedHandle) {
         // The cookie is real and ours, but it belongs to a different
         // authorization than the one the platform is calling back about. That
@@ -217,21 +183,17 @@ export class OAuthManager {
     token: string,
     projectId: string
   ): Promise<string> {
-    // Validate the state exists
     const authState = await this.getAuthorizationState(stateId, handle);
     if (!authState) {
       throw new Error('Invalid or expired authorization state');
     }
 
-    // Validate token and get user info
     const user = await validateToken(token);
 
-    // Still called for its refusal, not for its return value: this is where we
-    // find out the signed-in user may actually reach the project they picked.
-    // Everything it returns beyond the id is re-fetched per request through the
-    // project-key cache, so none of it is sealed into the token — see
-    // access-token.ts for why a caller-influenced field in there is a denial of
-    // service against everyone who shares the project.
+    // Called for its refusal: this is where we learn the signed-in user may
+    // reach the project they picked. Nothing beyond the id is sealed into the
+    // token — see access-token.ts for why a caller-influenced field there is a
+    // denial of service against everyone who shares the project.
     const projectAccess = await getProjectAccess(token, projectId);
 
     const accessToken = issueAccessToken(
@@ -243,15 +205,10 @@ export class OAuthManager {
       accessTokenKey()
     );
 
-    // Ours, sealed here rather than at the token endpoint, so the code carries
-    // two tokens of OURS instead of one of ours beside a raw platform
-    // credential. The values it needs — user and project — are in scope at this
-    // point and nowhere later, so building it anywhere else would mean
-    // forwarding them for no reason.
-    //
-    // Undefined when the platform sent no refresh token: an older platform, or
-    // a grant that does not issue one. That is a client without renewal, which
-    // is exactly today's behaviour, rather than an error.
+    // Sealed here rather than at the token endpoint, so the code carries two
+    // tokens of OURS instead of one of ours beside a raw platform credential.
+    // Undefined when the platform sent no refresh token (an older platform, or
+    // a grant that issues none): a client without renewal, not an error.
     const refreshToken = authState.platformRefreshToken
       ? issueRefreshToken(
           {
@@ -263,24 +220,11 @@ export class OAuthManager {
         )
       : undefined;
 
-    // No binding row: the access token IS the record. See access-token.ts for
-    // why the platform token goes in and the project API key deliberately does
-    // not.
-
-    // PKCE is REQUIRED for a sealed code, and this is the one place the
-    // stateless rewrite genuinely tightens behaviour rather than preserving it.
-    //
-    // GETDEL made the stored code single-use: redeemed once, gone. A sealed
-    // code cannot be single-use — there is nothing to delete — so it is
-    // replayable for its lifetime. What makes that acceptable is PKCE: a
-    // replayed code without the verifier is useless, and the verifier never
-    // leaves the client. Without PKCE a replay is a full second session, so the
-    // honest choice is to refuse rather than to issue a code we cannot protect.
-    //
-    // Nothing real is lost. The MCP spec requires PKCE of public clients, the
-    // SDK always sends it, and our AS metadata already advertises S256 as the
-    // only supported method — so this refuses a combination we never told
-    // anyone we would accept.
+    // PKCE is REQUIRED for a sealed code. A sealed code cannot be single-use —
+    // there is nothing to delete — so it is replayable for its lifetime, and
+    // PKCE is what makes that acceptable: a replayed code without the verifier
+    // is useless. Without PKCE a replay is a full second session, so refuse
+    // rather than issue a code we cannot protect.
     if (!authState.codeChallenge) {
       throw new Error(
         'PKCE is required: this server issues authorization codes that carry their own ' +
@@ -303,31 +247,31 @@ export class OAuthManager {
       AUTH_CODE_TTL
     );
 
-    // Nothing to clean up: the state was never stored. It stops being accepted
-    // when its own expiry passes.
-    //
-    // That does mean a sealed state is replayable inside its ten minutes, where
-    // the deleted row was single-use. The bound on that is the platform: a
-    // replay re-presents an authorization code the platform has already
-    // consumed, and it refuses. So a replay reaches this method and then fails
-    // at the exchange — it cannot mint a second session. Worth stating rather
-    // than discovering, because "signed" and "single-use" are easy to conflate.
+    // The state was never stored, so it stays acceptable until its own expiry:
+    // a sealed state is replayable inside its ten minutes. Which hop that
+    // reaches depends on what is replayed. The callback re-presents the
+    // platform's authorization code, which the platform has already consumed,
+    // so that replay fails there. This step runs on the platform access token
+    // the callback sealed into the state, which the platform still honours, so
+    // a replayed project selection mints a second code. What bounds that: the
+    // replayer must hold the sealed cookie, server.ts clears it when the flow
+    // completes, and the second code is redeemable only with the verifier of
+    // the client that started the flow.
     return code;
   }
 
   /**
-   * Exchange authorization code for token binding info
-   * This is called by the MCP client after OAuth callback
+   * Exchange an authorization code for the tokens sealed inside it.
+   * Called by the MCP client after the OAuth callback.
    *
-   * Uses atomic GETDEL to prevent authorization code replay attacks
+   * Nothing is stored, so there is no single-use delete: replay is bounded by
+   * PKCE (required at issue time) and by the five-minute expiry sealed inside.
    */
   async exchangeCode(
     code: string,
     redirectUri: string,
     codeVerifier?: string
   ): Promise<{ accessToken: string; refreshToken?: string }> {
-    // No GETDEL, because there is nothing stored. Replay is bounded by PKCE
-    // (required at issue time) and by the five-minute expiry sealed inside.
     let payload: {
       accessToken: string;
       refreshToken?: string;
@@ -343,47 +287,43 @@ export class OAuthManager {
 
     const { accessToken, refreshToken, redirectUri: storedRedirectUri, codeChallenge, codeChallengeMethod } = payload;
 
-    // Validate redirect URI
     if (redirectUri !== storedRedirectUri) {
       throw new Error('Redirect URI mismatch');
     }
 
-    // Unconditional now: a code without a challenge cannot be issued, so one
-    // arriving without it is not ours to honour.
+    // A code without a challenge cannot be issued, so one arriving without it
+    // is not ours to honour.
     if (!codeChallenge) {
       throw new Error('Authorization code is missing its code challenge');
     }
-    {
-      if (!codeVerifier) {
-        throw new Error('Code verifier required');
-      }
+    if (!codeVerifier) {
+      throw new Error('Code verifier required');
+    }
 
-      // Explicitly validate code challenge method
-      // Only S256 is secure; 'plain' is explicitly rejected per security best practices
-      if (codeChallengeMethod && codeChallengeMethod !== 'S256') {
-        throw new Error(`Unsupported code_challenge_method: ${codeChallengeMethod}. Only S256 is supported.`);
-      }
+    // Only S256; 'plain' is rejected.
+    if (codeChallengeMethod && codeChallengeMethod !== 'S256') {
+      throw new Error(`Unsupported code_challenge_method: ${codeChallengeMethod}. Only S256 is supported.`);
+    }
 
-      // Always use S256 for verification (treat missing method as S256)
-      const computedChallenge = createHash('sha256')
-        .update(codeVerifier)
-        .digest('base64url');
+    // A missing method is treated as S256.
+    const computedChallenge = createHash('sha256')
+      .update(codeVerifier)
+      .digest('base64url');
 
-      if (computedChallenge !== codeChallenge) {
-        throw new Error('Code verifier mismatch');
-      }
+    if (computedChallenge !== codeChallenge) {
+      throw new Error('Code verifier mismatch');
     }
 
     return { accessToken, refreshToken };
   }
+
   /**
    * Everything a tool call needs, from the token alone plus one cached lookup.
    *
-   * The token used to BE the Redis key; now it carries its own record. What it
-   * deliberately does not carry is the project API key — that is fetched here,
-   * from a 60-second cache, so the platform stays the authority on revocation.
-   * See project-key-cache.ts for why that TTL is fixed rather than bounded by
-   * the token's own expiry.
+   * The token deliberately does not carry the project API key — that is fetched
+   * here, from a 60-second cache, so the platform stays the authority on
+   * revocation. See project-key-cache.ts for why that TTL is fixed rather than
+   * bounded by the token's own expiry.
    */
   async resolveProjectFromToken(token: string): Promise<{
     apiKey: string;
@@ -417,22 +357,12 @@ export class OAuthManager {
         };
         cache.set(payload.userId, payload.projectId, key);
       } catch (error) {
-        // "REFUSED" AND "COULD NOT ASK" ARE DIFFERENT ANSWERS, and the first
-        // version of this collapsed them into one.
-        //
-        // A 401 or 403 is the platform saying this user may no longer reach
-        // this project: the credential is the problem, so the caller gets a
-        // 401 and re-authorizes. Anything else — a 500, a timeout, DNS, a
-        // rate limit — is us being unable to find out. Reporting that as
-        // "your sign-in is no longer valid" is a lie the client acts on: it
-        // throws away a perfectly good session and drags the user through a
-        // browser login to fix a platform hiccup that would have cleared on
-        // retry. The old binding held the key for 30 days, so a blip never
-        // signed anyone out; making the lookup per-request is what introduced
-        // this, and it needs the distinction the binding did not.
-        //
-        // Iris put the rule better than I did: 401 when the credential is the
-        // problem, 5xx when we could not tell.
+        // "Refused" and "could not ask" are different answers. A 401 or 403 is
+        // the platform saying this user may no longer reach this project: the
+        // caller gets a 401 and re-authorizes. Anything else — a 500, a timeout,
+        // DNS, a rate limit — is us being unable to find out, and reporting it
+        // as "your sign-in is no longer valid" makes the client throw away a
+        // good session over a blip that would have cleared on retry.
         if (isAuthorizationRefusal(error)) {
           console.log(
             `[OAuth] Project access refused for ${payload.userId}: ${

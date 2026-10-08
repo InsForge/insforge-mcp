@@ -111,3 +111,51 @@ describe('hop 3: the exchange hands it back', () => {
     expect(result.refreshToken).toBeUndefined();
   });
 });
+
+describe('hop 3 refuses what PKCE cannot protect', () => {
+  // A sealed code is replayable for its lifetime; the verifier check is the
+  // only thing that makes that acceptable. Each refusal is pinned so the
+  // branch cannot be disabled without a test noticing.
+  const redirectUri = 'http://127.0.0.1:8765/callback';
+  const verifier = 'v'.repeat(64);
+
+  async function codeWith(overrides: Record<string, unknown>) {
+    const { createHash } = await import('crypto');
+    return sealAuthState(
+      {
+        accessToken: 'platform-access-token',
+        redirectUri,
+        codeChallenge: createHash('sha256').update(verifier).digest('base64url'),
+        codeChallengeMethod: 'S256',
+        ...overrides,
+      },
+      authCodeKey(),
+      Date.now(),
+      5 * 60
+    );
+  }
+
+  it('rejects an exchange that brings no verifier', async () => {
+    await expect(manager.exchangeCode(await codeWith({}), redirectUri)).rejects.toThrow(
+      'Code verifier required'
+    );
+  });
+
+  it('rejects a verifier that does not hash to the sealed challenge', async () => {
+    await expect(manager.exchangeCode(await codeWith({}), redirectUri, 'w'.repeat(64))).rejects.toThrow(
+      'Code verifier mismatch'
+    );
+  });
+
+  it('rejects a code sealed without a challenge', async () => {
+    await expect(
+      manager.exchangeCode(await codeWith({ codeChallenge: undefined }), redirectUri, verifier)
+    ).rejects.toThrow('Authorization code is missing its code challenge');
+  });
+
+  it('rejects a challenge method other than S256', async () => {
+    await expect(
+      manager.exchangeCode(await codeWith({ codeChallengeMethod: 'plain' }), redirectUri, verifier)
+    ).rejects.toThrow('Unsupported code_challenge_method: plain');
+  });
+});
