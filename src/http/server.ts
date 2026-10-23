@@ -491,11 +491,15 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
 
   if (!code_challenge) {
     // Refused here, not at the end of the flow: authorization codes are
-    // stateless and cannot be single-use, so PKCE is what stops a replay, and
-    // the MCP client reads this response but never the one after the browser
-    // steps. PKCE_REQUIRED_PAGE overrides the invalid_request copy because that
-    // copy names a cause (an app restarted on a different port) that is true at
-    // the redirect_uri site below and false here.
+    // stateless and cannot be single-use, so for its lifetime a leaked code is
+    // redeemable by anyone unless bound to a verifier. PKCE is that binding. It
+    // defends against interception, not reuse: whoever holds the verifier can
+    // redeem the same code again until it expires (exchangeCode in
+    // oauth-manager.ts has nothing to delete). And the MCP client reads this
+    // response but never the one after the browser steps. PKCE_REQUIRED_PAGE
+    // overrides the invalid_request copy because that copy names a cause (an
+    // app restarted on a different port) that is true at the redirect_uri site
+    // below and false here.
     return sendOAuthError(
       req,
       res,
