@@ -66,10 +66,14 @@ export const ACCESS_TOKEN_TTL_SECONDS = 24 * 60 * 60;
  * means something changed, and far enough below 15512 that the refusal happens
  * here, where it is explained, rather than at a proxy that will not say why.
  *
- * It THROWS rather than truncating or warning, and the failure lands at
- * sign-in, where the callback's error handler turns it into the OAuth error
- * page. The alternative is a token every proxy silently refuses to carry,
- * surfacing later as a client that cannot connect for reasons nothing logs.
+ * It THROWS rather than truncating or warning. The failure lands at sign-in,
+ * in the project-selection handler (createAuthorizationCode mints the token
+ * before sealing the code), whose catch answers 500 with a `server_error` JSON
+ * body carrying this message instead of redirecting with a code. On a refresh
+ * grant the same throw escapes the token endpoint unhandled, so Express
+ * answers 500 there. The alternative is a token every proxy silently refuses
+ * to carry, surfacing later as a client that cannot connect for reasons
+ * nothing logs.
  */
 export const MAX_ACCESS_TOKEN_LENGTH = 4096;
 
