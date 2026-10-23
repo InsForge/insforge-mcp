@@ -6,11 +6,14 @@
  * that otherwise take 20ms, so the cache is part of the design rather than an
  * optimisation.
  *
- * THE TTL IS FIXED AND SHORT, AND THAT IS THE WHOLE DESIGN. Revocation belongs
- * to the platform (`validateAccessToken` checks `revoked` on every call), so
- * caching bounded by the token's own `exp` would make the platform's revoke a
- * no-op from our side for the life of the token. Sixty seconds is the bound on
- * how stale a revocation can be.
+ * THE TTL IS FIXED AND SHORT, AND THAT IS THE WHOLE DESIGN. A cache hit is
+ * served without asking the platform. A miss has resolveProjectFromToken call
+ * getProjectAccess with the platform access token, and the platform enforces
+ * its own revocation on that call (a 401/403 refusal becomes a 401 to the
+ * client). Caching bounded by the token's own `exp` would make the platform's
+ * revoke a no-op from our side for the life of the token. Sixty seconds is the
+ * bound on how stale a revocation can be: a revoked grant keeps working for at
+ * most one TTL after its last cache miss.
  */
 
 export const PROJECT_KEY_TTL_MS = 60 * 1000;
@@ -21,12 +24,16 @@ export const PROJECT_KEY_TTL_MS = 60 * 1000;
  * Expiry checked on read alone leaves every never-re-read entry, each holding
  * a project API key, in the Map for the life of the container. So eviction
  * runs on the write path, rate-limited because the scan is O(n) and the write
- * path is per-request: an expired entry outlives its expiry by at most a
- * second whatever the request rate.
+ * path is per-request: at most one full scan per second, whatever the request
+ * rate.
  *
  * Deliberately NOT a timer: a background sweeper would keep a container awake
- * to tidy a 60-second Map. If writes stop entirely, the last window's entries
- * stay until the next write, bounded by one TTL window.
+ * to tidy a 60-second Map. The cost is that how long an expired entry lingers
+ * is bounded by write cadence, not by time. It is dropped by the first `set`
+ * that lands at least a second after the previous scan: within a second of
+ * expiry under steady traffic, after however long the gap is when writes are
+ * sparse, and not at all if writes stop, unless that same key is read (which
+ * deletes it) or its user signs out (forgetUser).
  */
 const EVICTION_SCAN_INTERVAL_MS = 1000;
 

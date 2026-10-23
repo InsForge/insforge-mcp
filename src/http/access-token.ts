@@ -13,9 +13,10 @@ import { sealAuthState, openAuthState, InvalidAuthStateError } from './auth-stat
  * life, so a rotated or revoked project key would keep working. It is fetched
  * per request from a cache with a short fixed TTL (project-key-cache.ts).
  *
- * A sealed token cannot be deleted, so revocation is the platform's:
- * `validateAccessToken` checks `revoked` on every call, and the bound on how
- * stale that can be is the project-key cache TTL.
+ * A sealed token cannot be deleted, so revocation is the platform's: it is
+ * enforced on each project-key cache miss, when resolveProjectFromToken asks
+ * the platform for project access with the platform token inside, and the
+ * bound on how stale that can be is the project-key cache TTL.
  */
 
 /**

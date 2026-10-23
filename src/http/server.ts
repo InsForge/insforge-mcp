@@ -678,10 +678,12 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
 
     console.log('[OAuth] Exchanging code for tokens...');
 
-    // A throw means the platform could not be reached: 503 with Retry-After. A
-    // parsed body with an `error` field means the platform answered and
-    // declined: 400. /oauth/authorize is unauthenticated, so a stranger can
-    // reach this exchange.
+    // A throw means no usable response was obtained (fetch failed, timed out,
+    // or the body was unparseable): 503 with Retry-After. A parsed body with an
+    // `error` field means the platform answered; ordinary grant errors are a
+    // 400, while invalid_client and unauthorized_client are a 503 because they
+    // identify THIS SERVER's credentials. /oauth/authorize is unauthenticated,
+    // so a stranger can reach this exchange.
     let tokens: PlatformTokens;
     try {
       tokens = await exchangePlatformCode({
