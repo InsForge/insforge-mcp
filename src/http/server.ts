@@ -1315,6 +1315,10 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
     // answers the same way. A 400 is not the code the client's recovery is
     // keyed on: it reads as "your request was malformed", the client stops, and
     // every restart becomes a stuck client.
+    //
+    // Still unverified, and stated rather than implied: nobody has watched a
+    // real editor take this 404 and re-initialize. The status is what the spec
+    // and the SDK server agree on; the client's recovery is inferred from them.
     console.log('[Streamable HTTP] Unknown session, asking the client to start a new one:', sessionFingerprint(sessionId));
     return res.status(404).json({
       error: 'Session not found',
