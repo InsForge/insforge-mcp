@@ -1,23 +1,16 @@
 /**
  * The project API key, fetched per request and cached briefly.
  *
- * It used to live in the token binding, written once at sign-in and reused for
- * thirty days. That is what made the binding necessary, and it had two
- * consequences nobody chose: a rotated project key kept working until the
- * binding expired, and the MCP could not survive a restart.
+ * Not stored for the life of a sign-in: a key frozen that long keeps working
+ * after rotation. The platform round-trip costs ~60ms, which dominates tools
+ * that otherwise take 20ms, so the cache is part of the design rather than an
+ * optimisation.
  *
- * So fetch it instead. The cost is a platform round-trip, and Iris measured the
- * floor: ~60ms of platform server time, location-independent, on a route that
- * does nothing. On tools that otherwise take 20ms that is the dominant cost —
- * which is why this cache is part of the change rather than an optimisation.
- *
- * THE TTL IS FIXED AND SHORT, AND THAT IS THE WHOLE DESIGN. With the binding
- * gone there is no row to delete, so revocation belongs to the platform:
- * `validateAccessToken` checks `revoked` on every call. Caching bounded by the
- * token's own `exp` — which is what I first specced — would have made the
- * platform's revoke endpoint a no-op from our side for the life of the token.
- * Sixty seconds is the bound on how stale a revocation can be, and it is the
- * number that keeps "revoke" meaning something.
+ * THE TTL IS FIXED AND SHORT, AND THAT IS THE WHOLE DESIGN. Revocation belongs
+ * to the platform (`validateAccessToken` checks `revoked` on every call), so
+ * caching bounded by the token's own `exp` would make the platform's revoke a
+ * no-op from our side for the life of the token. Sixty seconds is the bound on
+ * how stale a revocation can be.
  */
 
 export const PROJECT_KEY_TTL_MS = 60 * 1000;
@@ -25,27 +18,15 @@ export const PROJECT_KEY_TTL_MS = 60 * 1000;
 /**
  * How often the write path is allowed to scan for expired entries.
  *
- * The first version checked expiry on read only, and its comment claimed an
- * unread entry "costs one Map slot for 60 seconds". Quinn measured it: it costs
- * one Map slot FOREVER.
+ * Expiry checked on read alone leaves every never-re-read entry, each holding
+ * a project API key, in the Map for the life of the container. So eviction
+ * runs on the write path, rate-limited because the scan is O(n) and the write
+ * path is per-request: an expired entry outlives its expiry by at most a
+ * second whatever the request rate.
  *
- *   10,000 entries written, one more an hour later, nothing re-read -> 10,001
- *
- * Every one of those slots holds a project API key, in memory, long past the
- * TTL that exists to bound exactly that — for the life of the container and
- * across every user who ever signed in. `forgetUser` only fires on sign-out,
- * which is the case that already ends well.
- *
- * So eviction moves to the write path. Rate-limited rather than run on every
- * `set`, because the scan is O(n) and the write path is per-request: at one
- * scan per second the cost is bounded whatever the request rate, and an expired
- * entry outlives its expiry by at most a second.
- *
- * Deliberately NOT a timer. A background sweeper for a 60-second cache is more
- * machinery than the thing it manages, and it would keep a container awake to
- * tidy a Map. The honest residual: if writes stop entirely, the last window's
- * entries stay until the next write — bounded by one TTL window rather than
- * unbounded, which was the defect.
+ * Deliberately NOT a timer: a background sweeper would keep a container awake
+ * to tidy a 60-second Map. If writes stop entirely, the last window's entries
+ * stay until the next write, bounded by one TTL window.
  */
 const EVICTION_SCAN_INTERVAL_MS = 1000;
 
@@ -66,27 +47,11 @@ interface Entry {
  *
  * Not by project alone: two users can both reach one project with different
  * grants, and a cache keyed on the project would serve one user's key to the
- * other. That is the shape of a cross-tenant bug, so the key is the pair.
- *
- * THE NESTING IS THE FIX, and it replaces a `${userId} ${projectId}` join that
- * Quinn broke in two lines:
- *
- *   set('a',   'b c', FIRST)      both produce the key "a b c"
- *   set('a b', 'c',   SECOND)
- *   get('a',   'b c')  ->  SECOND — one entry, another user's key
- *
- * Not reachable today: both values are platform UUIDs. But `project_id` is
- * about to become a tool argument, and then a caller who can put a space in it
- * is aiming at a chosen cache slot. The paragraph above says the pair IS the
- * key precisely to prevent cross-tenant serving, so an encoding under which two
- * pairs collide contradicts the thing it was written for.
- *
- * A delimiter would close this instance. Nesting closes the CLASS: two maps
- * cannot collide whatever the strings contain, there is no separator for a
- * caller to smuggle, and nobody has to keep obeying a rule about which
- * character is reserved. It also makes forgetUser a single delete instead of a
- * prefix scan over every entry — and that prefix scan was the same
- * joined-string assumption, one method further down.
+ * other. Not a `${userId} ${projectId}` join either: ('a', 'b c') and
+ * ('a b', 'c') produce the same key, so a caller who can put a separator in
+ * either value is aiming at a chosen cache slot. Nesting closes the class: two
+ * maps cannot collide whatever the strings contain, and forgetUser is a single
+ * delete.
  */
 export class ProjectKeyCache {
   private byUser = new Map<string, Map<string, Entry>>();
@@ -123,18 +88,14 @@ export class ProjectKeyCache {
   }
 
   /**
-   * Drop everything for one user.
-   *
-   * The one case where a stale entry is actively wrong rather than merely old:
-   * a sign-out. Now a single delete rather than a scan over every entry in the
-   * cache, because the user is a level of the structure rather than a prefix of
-   * a string.
+   * Drop everything for one user: the one case where a stale entry is actively
+   * wrong rather than merely old, a sign-out.
    */
   forgetUser(userId: string): void {
     this.byUser.delete(userId);
   }
 
-  /** For /health, so the cache is observable rather than a black box. */
+  /** Total number of cached entries across all users. */
   size(): number {
     let total = 0;
     for (const forUser of this.byUser.values()) total += forUser.size;

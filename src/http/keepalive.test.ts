@@ -2,8 +2,7 @@ import { describe, it, expect, vi, afterEach, type Mock } from 'vitest';
 import { positiveIntEnv } from './config.js';
 
 /**
- * The keepalive itself is a few lines inline in the SSE handler, and server.ts
- * calls startServer() at import time so it can't be imported here. These cover
+ * The keepalive itself is a few lines inline in the SSE handler. These cover
  * the behaviour that matters — write on tick, stop on close, never write to a
  * finished response — against the same shape the handler uses, plus the env
  * parsing that decides the interval.
