@@ -139,7 +139,7 @@ function tokenFingerprint(token: string): string {
 }
 
 /**
- * Resolve project information from OAuth token
+ * Project information resolved from an OAuth token.
  */
 interface ResolvedProject {
   apiKey: string;
@@ -152,20 +152,10 @@ interface ResolvedProject {
 }
 
 /**
- * Three outcomes, not two.
- *
- * `unavailable` is the one that had to be added back. #95 collapsed every
- * failure into "no project" so that a stale token could not produce a 500 with
- * no challenge, and the justification I wrote was that the client's available
- * action is identical either way. **It stops being identical the moment a retry
- * would have worked** — which is exactly a platform blip. Iris named that, and
- * she is right: the rule is 401 when the credential is the problem, 5xx when we
- * could not tell.
- *
- * Both halves still matter. Reporting a fault as 401 drags a user through a
- * browser login to fix something that would have cleared on its own; reporting
- * a dead credential as 500 tells the client to give up when signing in again is
- * exactly what it should do.
+ * Three outcomes, not two: 401 when the credential is the problem, 5xx when we
+ * could not tell. Reporting a platform fault as 401 drags a user through a
+ * browser login for something a retry would fix; reporting a dead credential as
+ * 500 tells the client to give up when signing in again is the remedy.
  */
 type ProjectResolution =
   | { outcome: 'resolved'; project: ResolvedProject }
@@ -200,23 +190,10 @@ async function resolveProject(token: string): Promise<ProjectResolution> {
     const project = await oauthManager.resolveProjectFromToken(token);
     return project ? { outcome: 'resolved', project } : { outcome: 'unauthorized' };
   } catch (error) {
-    // NOTHING here may escape as an unhandled throw — that is still the point
-    // of this wrapper, and it is why a stale bearer no longer produces a 500
-    // with a raw Express stack and no WWW-Authenticate (#95, measured on the
-    // live slug).
-    //
-    // What has changed is WHICH answer it turns into. #95 made every failure a
-    // challenge, on the argument that the client's available action is
-    // identical either way. That argument is sound for a dead credential and
-    // wrong for a platform blip: re-authorizing does not fix a platform that is
-    // down, and telling a client its sign-in is invalid throws away a working
-    // session and sends a person to a browser for nothing.
-    //
-    // A token that does not open never reaches here — resolveProjectFromToken
-    // returns null for that, which is 'unauthorized'. Anything that throws is
-    // by definition something we could not determine, so it is 'unavailable'
-    // and the caller answers 503 with Retry-After. The challenge stays for the
-    // case the challenge is actually the remedy.
+    // Nothing may escape this wrapper as a throw. A token that does not open
+    // never reaches here (resolveProjectFromToken returns null for that, which
+    // is 'unauthorized'); anything that throws is something we could not
+    // determine, so it is 'unavailable' and the caller answers 503.
     console.error('[OAuth] Could not determine whether this token is valid:', error);
     return { outcome: 'unavailable' };
   }
@@ -236,26 +213,14 @@ function extractOAuthToken(req: Request): string | undefined {
 /**
  * Refuse a request that names a session it was not the one to open.
  *
- * ONE FUNCTION, CALLED BY EVERY VERB, and that is the whole point of its
- * existing at all. The first version of this bound POST only — and a session is
- * reachable by three verbs, so it was a POST-shaped fix for a session-shaped
- * problem. Quinn demonstrated the gap rather than argued it:
+ * Called by every verb, not just POST: DELETE on the id alone logs someone else
+ * out, and GET opens the server->client stream and receives everything pushed
+ * for that session. Returns true when it has already answered.
  *
- *   DELETE /mcp with just the session id      -> 200
- *   the victim's very next valid request      -> 404
- *
- * One request, no credential of any kind, and someone else is logged out. GET
- * is quieter and worse: it opens the server->client stream on the id alone and
- * receives everything pushed for that session, with no forged requests at all.
- *
- * Returns true when it has already answered, so a caller is one line:
- *
- *   if (refuseMismatchedCredential(req, res, sessionId)) return;
- *
- * Placement matters and is not interchangeable: call it only AFTER the handler
- * has established that this process holds the session. Before that, it would
- * authenticate ahead of routing and a client with a dead session plus a stale
- * token would get 401 where it needs the 404 that tells it to start over.
+ * Call it only AFTER the handler has established that this process holds the
+ * session. Before that it would authenticate ahead of routing, and a client with
+ * a dead session plus a stale token would get 401 where it needs the 404 that
+ * tells it to start over.
  */
 function credentialMatchesSession(req: Request, sessionId: string): boolean {
   const stored = getSessionManager().getSessionData(sessionId)?.oauthTokenHash;
@@ -274,24 +239,10 @@ function refuseMismatchedCredential(req: Request, res: Response, sessionId: stri
       'credential does not match the one it was opened with'
   );
 
-  // 404, NOT 401, and this is the one decision here I got wrong first.
-  //
-  // 401 is the instruction "re-run OAuth". Consider the client that just did:
-  // it re-authorized, holds a NEW token, and retries with the session id it
-  // still has. The credential is valid and the session is real — but they
-  // belong to different sign-ins, so a 401 sends it round the OAuth loop again,
-  // to arrive with another new token and the same old id. That is an infinite
-  // loop triggered by the ordinary act of signing in again, and I only saw it
-  // because I tested the re-authorize case rather than only the attacker.
-  //
-  // The action this client actually needs is the one the routing 404 already
-  // gives: start a new session. So the answer is identical to "we do not hold
-  // that session" — which it effectively is, for you — and the recovery is
-  // coherent: ANY request naming a session this process will not serve you gets
-  // 404 and initializes again.
-  //
-  // It also happens to leak less. To someone probing with a stolen id, "not
-  // found" and "not yours" are now the same answer.
+  // 404, not 401. A 401 tells the client to re-run OAuth; a client that just did
+  // so holds a NEW token and the same old session id, so 401 sends it round the
+  // loop forever. 404 is the recovery the routing path already gives: start a
+  // new session. It also leaks less: "not found" and "not yours" read the same.
   res.status(404).json({
     error: 'Session not found',
     error_description:
@@ -312,13 +263,8 @@ function extractLegacyHeaders(req: Request): { apiKey?: string; apiBaseUrl?: str
 }
 
 /**
- * Heap numbers for the health payload.
- *
- * The session leak had to be diagnosed by counting objects and multiplying by
- * a separately-measured size, because the process publishes no memory metric
- * at all — so "how long until it dies" could only ever be an estimate. V8's
- * own limit is the number that actually decides that, and exposing it costs
- * nothing.
+ * Heap numbers for the health payload. V8's own limit, not RSS, is what decides
+ * how long the process lives, so it is published alongside usage.
  */
 function heapStats() {
   const { heap_size_limit, used_heap_size } = v8.getHeapStatistics();
@@ -403,9 +349,6 @@ app.get(OAUTH_ENDPOINTS.protectedResource, (_req: Request, res: Response) => {
 // ============================================================================
 
 /**
- * OAuth Dynamic Client Registration (RFC 7591)
- */
-/**
  * A registration metadata field the client may send as an array, or not at all,
  * or as something else entirely — it is request body, so it is not typed.
  * Anything that is not an array of strings is treated as absent, which lands on
@@ -416,6 +359,9 @@ function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
 }
 
+/**
+ * OAuth Dynamic Client Registration (RFC 7591)
+ */
 app.post(OAUTH_ENDPOINTS.register, (req: Request, res: Response) => {
   const {
     client_name,
@@ -428,16 +374,9 @@ app.post(OAUTH_ENDPOINTS.register, (req: Request, res: Response) => {
 
   const clientName = typeof client_name === 'string' && client_name ? client_name : 'MCP Client';
 
-  // #104: the response used to echo `grant_types` and `response_types` straight
-  // back, so a client that asked for `password` or a device code was TOLD YES at
-  // registration and refused at the token endpoint. A registration response is
-  // the server asserting what it will honour, and a client is entitled to plan
-  // against it.
-  //
-  // Rejected here rather than narrowed silently, for the reason this file keeps
-  // arriving at: refuse where the caller is listening. A client that asked for a
-  // grant it needs should find out now, from a message naming what it can have,
-  // rather than at the first token request in front of a user.
+  // A registration response is the server asserting what it will honour, so an
+  // unsupported grant_type is refused here, where the caller is listening, rather
+  // than discovered at the first token request in front of a user.
   const unsupportedGrants = asStringArray(grant_types).filter(
     (value) => !(OAUTH_CONFIG.grantTypes as readonly string[]).includes(value)
   );
@@ -461,9 +400,8 @@ app.post(OAUTH_ENDPOINTS.register, (req: Request, res: Response) => {
   }
 
   // The registration is carried by the id itself, so nothing is written here.
-  // mintClientId validates redirect_uris — count, absoluteness, scheme, and
-  // loopback-only plaintext http — and rejects anything it would not be able to
-  // read back, which is why this route no longer pre-checks the array itself.
+  // mintClientId validates redirect_uris (count, absoluteness, scheme,
+  // loopback-only plaintext http), so this route does not pre-check the array.
   let clientId: string;
   try {
     clientId = mintClientId(
@@ -552,24 +490,16 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
   }
 
   if (!code_challenge) {
-    // Refused HERE, not at the end.
-    //
-    // #91 made authorization codes stateless, which means they cannot be
-    // single-use, which means PKCE is what stops a replay. I put the refusal in
-    // createAuthorizationCode — and measured on the slug that a client without
-    // PKCE still gets a 302, signs in through the browser, picks a project, and
-    // only THEN fails. The person did all the work before we told them we were
-    // never going to accept it.
-    //
-    // That is the same mistake as validating a redirect_uri at authorize
-    // instead of at registration: reject where the caller is listening, not
-    // where only a browser can see it. The MCP client reads this response; it
-    // never reads the one at the end of the flow.
-    // An override, because `invalid_request` is emitted from several sites with
-    // different causes and the branch copy belongs to a different one: it tells
-    // the reader their app restarted on a different port, which is true at the
-    // redirect_uri site below and false here. Blair enumerated the sites and
-    // caught this asserting a cause that cannot be the cause.
+    // Refused here, not at the end of the flow: authorization codes are
+    // stateless and cannot be single-use, so for its lifetime a leaked code is
+    // redeemable by anyone unless bound to a verifier. PKCE is that binding. It
+    // defends against interception, not reuse: whoever holds the verifier can
+    // redeem the same code again until it expires (exchangeCode in
+    // oauth-manager.ts has nothing to delete). And the MCP client reads this
+    // response but never the one after the browser steps. PKCE_REQUIRED_PAGE
+    // overrides the invalid_request copy because that copy names a cause (an
+    // app restarted on a different port) that is true at the redirect_uri site
+    // below and false here.
     return sendOAuthError(
       req,
       res,
@@ -608,14 +538,10 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
         error_description: 'Client registration is not available on this server.',
       });
     }
-    // Nothing here can recover automatically. The MCP SDK only re-registers on
+    // Nothing here can recover automatically: the MCP SDK only re-registers on
     // an invalid_client from the token endpoint or from registration, and it
     // never sees this response — the browser does. So the person holding the
-    // tab is the only one who can act, and they need to be told how.
-    //
-    // This is also the path every client registered before this change takes:
-    // its id names a Redis row that is no longer read. The page below is the
-    // correct answer for them too — re-register and it works.
+    // tab is told how to act.
     console.log('[OAuth] Client id at authorize did not verify');
     return sendOAuthError(req, res, 400, {
       error: 'invalid_client',
@@ -624,21 +550,14 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
   }
 
   // Exact match against what the client registered, per RFC 6749 §3.1.2.3.
-  // This is the check mcp-use's oauthProxy omits, and omitting it is
-  // authorization-code theft: the code would be delivered to whatever URI the
-  // request named.
+  // Anything looser is authorization-code theft: the code would be delivered to
+  // whatever URI the request named.
   if (!isRegisteredRedirectUri(registration, redirect_uri)) {
-    // The branch a real user is most likely to reach, and until now the one
-    // that told them least: raw JSON in a browser tab.
     return sendOAuthError(req, res, 400, {
       error: 'invalid_request',
       error_description: 'redirect_uri does not match any registered redirect URIs for this client.',
     });
   }
-
-  // No TTL to refresh: the registration is not stored, so it cannot expire.
-  // The 30-day idle timeout this replaces is the bug that silently broke every
-  // client 30 days after it was installed.
 
   try {
     const oauthManager = getOAuthManager();
@@ -666,10 +585,8 @@ app.get(OAUTH_ENDPOINTS.authorize, async (req: Request, res: Response) => {
     console.log(`[OAuth] Redirecting to Insforge OAuth: ${authUrl.toString()}`);
     res.redirect(authUrl.toString());
   } catch (error) {
-    // john-bot's Critical on this PR, and it is the tenth consumer in a change
-    // whose whole point was not stopping at the ones I noticed. The entire GET
-    // is a browser navigation, so a throw anywhere inside it — a platform
-    // outage, a missing signing key — put raw JSON in the person's tab.
+    // The entire GET is a browser navigation, so a throw anywhere inside it
+    // must render as a page, not raw JSON.
     console.error('OAuth authorize error:', error);
     sendOAuthError(req, res, statusForHttpError(error), {
       error: 'server_error',
@@ -709,8 +626,8 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
     }
 
     // No registered redirect to bounce the error back to, so this ends in the
-    // user's tab. The callback is ALWAYS a browser navigation — it is the
-    // platform redirecting them here — so JSON was never right on any branch.
+    // user's tab. The callback is always a browser navigation (the platform
+    // redirecting them here), so the answer is a page, not JSON.
     return sendOAuthError(req, res, 400, {
       error: error as string,
       error_description: error_description as string | undefined,
@@ -765,24 +682,12 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
 
     console.log('[OAuth] Exchanging code for tokens...');
 
-    // THE THIRD UPSTREAM CALL, and the one that renders in a person's browser.
-    //
-    // Iris forced the platform unroutable on a branch env and drove this path
-    // without a login — /oauth/authorize is unauthenticated, so a stranger can
-    // reach the exchange:
-    //
-    //   platform reachable    400 invalid_grant     (the platform's own answer)
-    //   platform unroutable   500 "fetch failed"    Node's raw message, no Retry-After
-    //
-    // My own rule — 401 when the credential is the problem, 5xx when we could
-    // not tell — held on revoke and resolve and not here, which is exactly the
-    // shape that reads as done and is not. A mid-sign-in platform blip showed a
-    // human `server_error: fetch failed` on the callback page.
-    //
-    // The two cases are now separated by WHERE they are handled: a thrown error
-    // means we could not reach the platform and falls to the catch below, which
-    // answers 503; a parsed body with an `error` field means the platform
-    // answered and declined, which stays a 400.
+    // A throw means no usable response was obtained (fetch failed, timed out,
+    // or the body was unparseable): 503 with Retry-After. A parsed body with an
+    // `error` field means the platform answered; ordinary grant errors are a
+    // 400, while invalid_client and unauthorized_client are a 503 because they
+    // identify THIS SERVER's credentials. /oauth/authorize is unauthenticated,
+    // so a stranger can reach this exchange.
     let tokens: PlatformTokens;
     try {
       tokens = await exchangePlatformCode({
@@ -806,9 +711,8 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
         503,
         {
           error: 'temporarily_unavailable',
-          // Deliberately not the raw error. "fetch failed" is Node talking to
-          // itself; it tells the person nothing and is what was reaching the
-          // browser before.
+          // Deliberately not the raw error: "fetch failed" is Node talking to
+          // itself and tells the person nothing.
           error_description:
             'The InsForge platform could not be reached to complete this sign-in.',
         },
@@ -822,13 +726,10 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
       );
     }
 
-    // Same distinction as the refresh grant, on the path a ROTATION actually
-    // hits: during one nobody holds a refresh token yet, so everyone is doing a
-    // fresh sign-in and arrives here. `invalid_client` means the platform
-    // rejected OUR credentials — a wrong INSFORGE_CLIENT_SECRET — and telling
-    // the person their sign-in failed sends them round a loop that cannot
-    // terminate, because every retry fails identically until an operator fixes
-    // the config. Max caught this one; I had fixed only the refresh path.
+    // Same distinction as the refresh grant. `invalid_client` means the platform
+    // rejected OUR credentials (a wrong INSFORGE_CLIENT_SECRET), not the user's
+    // sign-in; telling the person their sign-in failed sends them round a loop
+    // that cannot terminate until an operator fixes the config.
     if (tokens.error === 'invalid_client' || tokens.error === 'unauthorized_client') {
       console.error(
         '[OAuth] The platform rejected OUR client credentials during sign-in. ' +
@@ -886,12 +787,8 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
 
     console.log('[OAuth] Token received, redirecting to project selection...');
 
-    // The token rides inside the state instead of a row keyed by it. The
-    // state_id therefore CHANGES here — it is the record, so a record with one
-    // more field is a different string.
-    // The refresh token rides along from here. It arrived in this same response
-    // and was dropped on the floor until now, which is the whole reason a
-    // connected client died after an hour.
+    // The tokens ride inside the sealed state, not in a row keyed by it, so the
+    // sealed string changes here while the handle does not.
     const stateWithToken = oauthManager.attachPlatformToken(
       authState,
       tokens.access_token,
@@ -911,11 +808,8 @@ app.get(OAUTH_ENDPOINTS.callback, async (req: Request, res: Response) => {
       errorDescription: 'Failed to process callback',
       endpoint: '/oauth/callback',
     });
-    // The EIGHTH browser-reachable branch, and the third time on this PR that
-    // I converted the ones I could see and missed one. The callback is a
-    // browser navigation end to end, so its outer catch is as visible as any
-    // branch inside it. Counting is not the method; routing everything through
-    // one helper is, and this is the last place that was not.
+    // The callback is a browser navigation end to end, so the outer catch
+    // renders a page like every branch inside it.
     sendOAuthError(req, res, statusForHttpError(error), {
       error: 'server_error',
       error_description: error instanceof Error ? error.message : 'Failed to process callback',
@@ -1049,28 +943,16 @@ app.post(OAUTH_ENDPOINTS.token, async (req: Request, res: Response) => {
         scope: 'mcp:read mcp:write',
       });
 
-      // 24 hours, not the binding's 30 days: a value that cannot be revoked
-      // directly should not live for a month. But the platform token sealed
-      // inside has its own expiry, and whichever runs out first ends the
-      // session — so advertise the real minimum rather than our ceiling.
-      //
-      // Saying a flat 24h was the "safe direction" only for us. For a client
-      // whose platform token dies in two hours it means four more of retrying a
-      // credential we already know is dead, instead of signing in again.
+      // The platform token sealed inside has its own expiry, and whichever runs
+      // out first ends the session, so advertise the real minimum rather than
+      // our ceiling. A flat 24h would have a client retry a dead credential for
+      // hours instead of signing in again.
       const payload = readAccessToken(accessToken, accessTokenKey());
       const expiresIn = payload
         ? accessTokenLifetimeSeconds(payload)
         : ACCESS_TOKEN_TTL_SECONDS;
 
-      // refresh_token is spread in rather than always present: a code minted
-      // before this shipped carries none, and `refresh_token: undefined` would
-      // serialise the key away anyway — but stating the conditional makes the
-      // absence deliberate rather than incidental. Quinn caught this being
-      // MINTED AND DROPPED one line above: exchangeCode returned it, the
-      // destructure ignored it, and the response omitted it, so discovery
-      // advertised a grant no client could ever obtain the credential for.
-      // Nothing was type-wrong about discarding a returned field, which is why
-      // only a real login found it.
+      // Omitted, not `undefined`, when the code carried no refresh token.
       res.json({
         access_token: accessToken,
         token_type: 'Bearer',
@@ -1091,12 +973,8 @@ app.post(OAUTH_ENDPOINTS.token, async (req: Request, res: Response) => {
       });
     }
   } else if (grant_type === 'refresh_token') {
-    // Until now this answered `unsupported_grant_type`, which is why every
-    // connected client died after an hour: the platform token sealed in our
-    // access token is a ONE-HOUR JWT, we advertise whichever expiry is sooner,
-    // and there was no way back except a browser. For a CLI that is an
-    // annoyance; for a hosted connector signed in once in someone else's
-    // browser it is a broken integration.
+    // The platform token sealed in our access token is a one-hour JWT, so this
+    // grant is the only way back without a browser.
     const { refresh_token } = req.body;
 
     if (!refresh_token) {
@@ -1141,18 +1019,10 @@ app.post(OAUTH_ENDPOINTS.token, async (req: Request, res: Response) => {
       });
     }
 
-    // The platform declining OUR credentials is not the user's grant expiring,
-    // and collapsing the two is the same mistake as answering "sign in again"
-    // for an unreachable platform — one step further in.
-    //
-    //   {"error":"invalid_client","message":"Invalid client credentials"}  401
-    //
-    // is what it returns when INSFORGE_CLIENT_SECRET is wrong, which is exactly
-    // what a botched rotation or a half-finished client swap produces. Reported
-    // as invalid_grant it tells EVERY connected user to sign in again, they all
-    // do, and every new sign-in fails the same way — a stampede caused by our
-    // config and blamed on their session. Measured against the real platform
-    // rather than assumed.
+    // The platform declining OUR credentials (`invalid_client`, 401, when
+    // INSFORGE_CLIENT_SECRET is wrong) is not the user's grant expiring.
+    // Reported as invalid_grant it tells every connected user to sign in again,
+    // and every new sign-in fails the same way until the config is fixed.
     if (tokens.error === 'invalid_client') {
       console.error(
         '[OAuth] The platform rejected OUR client credentials on refresh. ' +
@@ -1239,21 +1109,11 @@ app.post(OAUTH_ENDPOINTS.revoke, async (req: Request, res: Response) => {
     });
   }
 
-  // THIS ENDPOINT USED TO DO NOTHING, and returned 200 while doing it.
-  //
-  // With the binding row gone, all it did was drop the cached project key. The
-  // sealed bearer still carried a live platform token, so the very next request
-  // re-fetched the key and succeeded: revoking a leaked credential forced one
-  // extra round trip and left it working for its full 24 hours. A revoke that
-  // reports success and changes nothing is worse than no revoke at all, because
-  // the person who called it stops looking for the leak.
-  //
-  // So revoke the thing that actually grants access — the platform token sealed
-  // inside. Iris confirmed the upstream endpoint is deployed and needs only our
-  // client id. The alternative considered and rejected was a local revocation
-  // marker: that is a durable per-token record consulted on every request, which
-  // is `mcp:auth:binding:` again under another name and would put back the store
-  // this whole effort removed.
+  // Revoke the thing that actually grants access: the platform token sealed
+  // inside. Dropping the cached project key alone leaves the bearer working for
+  // its full lifetime, since the next request re-fetches the key. Do not add a
+  // local revocation marker instead: that is a per-token store consulted on
+  // every request, which this design exists to avoid.
   const payload = readAccessToken(token as string, accessTokenKey());
 
   if (!payload) {
@@ -1275,16 +1135,9 @@ app.post(OAUTH_ENDPOINTS.revoke, async (req: Request, res: Response) => {
     return res.status(200).send();
   } catch (error) {
     // NOT a 200. RFC 7009's blanket success is about not leaking which tokens
-    // exist; it is not licence to report a revocation that failed as one that
-    // worked. The caller is trying to shut off a credential — telling them it
-    // is off when it is still live is the same false assurance this endpoint
-    // just stopped giving, one layer down.
-    //
-    // This does mean a failure here distinguishes "was ours" from "was not",
-    // which the blanket 200 exists to hide. It only happens when the platform
-    // is already failing, it is not attacker-triggerable, and the alternative
-    // is lying about a security operation. Stated so the trade is visible
-    // rather than discovered.
+    // exist, not licence to report a failed revocation as one that worked. This
+    // does let a failure distinguish "was ours" from "was not", but only when
+    // the platform is already failing, and it is not attacker-triggerable.
     console.error(`[OAuth] FAILED to revoke the platform token for ${payload.userId}:`, error);
 
     // The same classification as everywhere else, because the caller's next
@@ -1327,16 +1180,8 @@ app.get(API_ENDPOINTS.projects, async (req: Request, res: Response) => {
 
   const token = authHeader.substring(7);
 
-  // UNSEAL FIRST. This handed our own bearer straight to the platform, which
-  // worked only while the bearer WAS a platform token. Since the token became a
-  // sealed envelope, the platform receives a string it has never issued and
-  // answers 401 — so `/api/projects` has been broken for every caller, and with
-  // it `list-projects`, the capability this whole design exists to enable.
-  //
-  // The bug is the shape the sealed token invites: every place that used to
-  // forward the bearer now has to open it and forward what is INSIDE. This was
-  // the last one, and it was missed because nothing calls this endpoint in
-  // tests — the project-selection page is its only real caller.
+  // Unseal first: the bearer is a sealed envelope, and the platform must
+  // receive the platform token inside it, never our string.
   const payload = readAccessToken(token, accessTokenKey());
   if (!payload) {
     return res.status(401).json({ error: 'Invalid or expired token' });
@@ -1367,10 +1212,9 @@ app.post(API_ENDPOINTS.bindProject, async (req: Request, res: Response) => {
   const token = authHeader.substring(7);
   const projectId = req.params.projectId as string;
 
-  // A token can no longer be re-pointed at another project, because there is no
-  // row to update — the project is sealed inside the token the client already
-  // holds. Saying so is better than the alternatives: silently doing nothing
-  // would look like success, and issuing a NEW token here would hand a caller a
+  // A token cannot be re-pointed at another project: the project is sealed
+  // inside the token the client already holds. Silently doing nothing would
+  // look like success, and issuing a NEW token here would hand a caller a
   // credential through an endpoint that never authenticated anyone.
   try {
     const payload = readAccessToken(token, accessTokenKey());
@@ -1380,17 +1224,10 @@ app.post(API_ENDPOINTS.bindProject, async (req: Request, res: Response) => {
 
     if (payload.projectId === projectId) {
       // Already there. Idempotent rather than an error: a client retrying is
-      // not making a mistake.
-      //
-      // The id and nothing else. This used to echo the project's name and
-      // organization out of the token, and those two fields are exactly what
-      // made the sealed payload unbounded — a project name has no maximum
-      // length upstream. They are display data, so they left the credential
-      // (access-token.ts) rather than staying in it to serve one response body.
-      //
-      // Re-fetching them here to keep the shape was the tempting move and the
-      // wrong one: it would put a platform round-trip, and a platform outage,
-      // in the path of an endpoint that answers purely from the token today.
+      // not making a mistake. The id and nothing else: name and organization
+      // are display data that do not live in the credential (access-token.ts),
+      // and re-fetching them here would put a platform round-trip in the path
+      // of an endpoint that answers purely from the token.
       return res.json({
         success: true,
         project: { id: payload.projectId },
@@ -1449,9 +1286,8 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
   //
   // Note for anyone auditing what is reachable unauthenticated: an existing
   // session is served without a token check too, so the Mcp-Session-Id is a
-  // bearer credential in its own right. That is unchanged by this file's
-  // history — master does the same — and it is why the id is randomUUID() and
-  // never derived from anything guessable.
+  // bearer credential in its own right, which is why the id is randomUUID()
+  // and never derived from anything guessable.
   const isInitialize = isInitializeRequest(req.body);
   let route = routeForSessionRequest({
     hasRuntime: existingRuntime !== null,
@@ -1459,23 +1295,14 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
     isInitialize,
   });
 
-  // THE BINDING REFUSES USE OF A SESSION, NEVER CREATION OF ONE, and this line
-  // is here because the first version got that wrong in a way tests missed.
-  //
-  // Routing prefers a session we hold, so a re-authorized client sending
-  // `initialize` while its OLD session is still alive routes to 'use-existing'.
-  // Its new token does not match, so it was refused — and `initialize` is
-  // precisely the request that repairs the situation, so it was refused
-  // forever, for as long as the stale session lived. A loop with a 24-hour
-  // exit, caused by signing in again.
-  //
-  // My test for the escape hatch asserted `hasRuntime: false` and passed
-  // happily while the live-session case failed. It only showed up by driving a
-  // real re-authorization end to end.
-  //
-  // Falling through to 'create' rather than reusing the session is the correct
-  // half too: a different credential may be a different user or project, so
-  // handing it the old session's project binding would be worse than refusing.
+  // The binding refuses USE of a session, never creation of one. Routing
+  // prefers a session we hold, so a re-authorized client sending `initialize`
+  // while its old session is still alive routes to 'use-existing'; its new
+  // token does not match, and `initialize` is precisely the request that
+  // repairs that, so without this it would be refused for as long as the stale
+  // session lived. Fall through to 'create' rather than reusing the session: a
+  // different credential may be a different user or project, so handing it the
+  // old session's project binding would be worse than refusing.
   if (route === 'use-existing' && isInitialize && !credentialMatchesSession(req, sessionId)) {
     route = 'create';
   }
@@ -1488,27 +1315,16 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
     console.log('[Streamable HTTP] Using existing transport for session:', sessionFingerprint(sessionId));
     sessionManager.touchSession(sessionId);
   } else if (route === 'not-found') {
-    // A session id we do not hold. 404 IS THE ANSWER, and it is the one part of
-    // this change a client actually depends on.
+    // A session id we do not hold: 404. A client that receives 404 for a request
+    // carrying an Mcp-Session-Id MUST start a new session with an
+    // InitializeRequest (Streamable HTTP, 2025-03-26), and the SDK's own server
+    // answers the same way. A 400 is not the code the client's recovery is
+    // keyed on: it reads as "your request was malformed", the client stops, and
+    // every restart becomes a stuck client.
     //
-    // The restore branch that used to be here rebuilt a server and transport
-    // from a Redis record around the same session id. With no record there is
-    // nothing to rebuild, so the question is only which status says so, and the
-    // protocol answers it: a client that receives 404 for a request carrying an
-    // Mcp-Session-Id MUST start a new session with an InitializeRequest
-    // (Streamable HTTP, 2025-03-26). The SDK's own server does the same —
-    // "Requests with invalid session IDs are rejected with 404 Not Found".
-    //
-    // The 400 this used to fall through to is the wrong shape for the same
-    // reason a 500 was wrong for a stale token (#95): it is not the code the
-    // client's recovery is keyed on, so it reads as "your request was
-    // malformed" and the client stops instead of signing back in. Answering 400
-    // here would turn every restart into a stuck client.
-    //
-    // NOT verified end to end: nobody has watched a real editor take this 404
-    // and re-initialize. The status is what the spec and the SDK server agree
-    // on; the client's behaviour is Quinn's test, and it is the acceptance for
-    // this change rather than a detail after it.
+    // Still unverified, and stated rather than implied: nobody has watched a
+    // real editor take this 404 and re-initialize. The status is what the spec
+    // and the SDK server agree on; the client's recovery is inferred from them.
     console.log('[Streamable HTTP] Unknown session, asking the client to start a new one:', sessionFingerprint(sessionId));
     return res.status(404).json({
       error: 'Session not found',
@@ -1577,22 +1393,11 @@ app.post(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
       };
     }
 
-    // GENERATED, NEVER TAKEN FROM THE REQUEST — and since the binding landed
-    // this line is load-bearing rather than incidental.
-    //
-    // The binding exempts `initialize` so a re-authorized client can recover.
-    // That exemption is only safe because the id created here cannot be chosen
-    // by the caller. If this ever honoured an incoming Mcp-Session-Id — to
-    // "preserve session ids across re-initialization", say — an attacker with
-    // their own perfectly valid credentials could initialize ONTO a victim's
-    // session id, overwrite the entry in the session map, and take the session
-    // over. The exemption would then hand them the exact thing the binding
-    // exists to prevent.
-    //
-    // Quinn went looking for that hole specifically and measured it closed:
-    // asked for 11111111-…, got a server-generated id, header ignored. There is
-    // a test pinning it, because "we happen to generate it" is not a property
-    // anyone would notice losing.
+    // GENERATED, NEVER TAKEN FROM THE REQUEST. The binding exempts `initialize`
+    // so a re-authorized client can recover, and that is only safe because the
+    // id created here cannot be chosen by the caller: honouring an incoming
+    // Mcp-Session-Id would let anyone with valid credentials initialize ONTO a
+    // victim's session id and take it over. platform-paths.test.ts pins this.
     const newSessionId = randomUUID();
 
     transport = new StreamableHTTPServerTransport({
@@ -1652,8 +1457,7 @@ app.get(STREAMABLE_HTTP_ENDPOINTS.mcp, async (req: Request, res: Response) => {
 
   const runtime = sessionManager.getStreamableSession(sessionId);
   if (!runtime) {
-    // The "exists but not active" branch is gone with the store that made it
-    // possible: a session this process does not hold does not exist anywhere.
+    // A session this process does not hold does not exist anywhere.
     return res.status(404).json({
       error: 'Session not found. Initialize first with POST request.',
     });
@@ -1879,10 +1683,8 @@ app.post(SSE_ENDPOINTS.messages, async (req: Request, res: Response) => {
     });
   }
 
-  // The streamable path stamps a session on every request; the SSE path did
-  // not, so an SSE session read as idle from creation however active the client
-  // was. Kept — it is still the only thing that marks an SSE session alive.
-  // It can no longer fail, so it no longer needs a catch.
+  // The only thing that marks an SSE session alive; without it the session
+  // reads as idle from creation however active the client is.
   getSessionManager().touchSession(sessionId);
 
   await transport.handlePostMessage(req, res, req.body);
@@ -1897,14 +1699,9 @@ async function startServer() {
     // Validate configuration
     validateConfig();
 
-    // Unconditional, where it used to be gated on Redis being configured.
-    //
-    // That gate was right when Redis owned session lifetime and this timer only
-    // reclaimed the instances left behind. Now this IS session expiry: nothing
-    // else drops a session that a client walked away from, so a server that
-    // does not start the sweep leaks every session it ever creates until the
-    // heap runs out. Roughly 252 kB per session against this machine's ~493 MB
-    // heap limit — about 2,000 — so "leaks" means hours, not months.
+    // This sweep IS session expiry: nothing else drops a session a client walked
+    // away from, so a server that does not start it leaks every session it
+    // creates (roughly 252 kB each) until the heap runs out.
     getSessionManager().startIdleSweep(SESSION_SWEEP_MS);
 
     const server = app.listen(SERVER_CONFIG.port, SERVER_CONFIG.host, () => {
@@ -2015,27 +1812,14 @@ async function startServer() {
 }
 
 /**
- * Start only when this module IS the process entry point.
+ * Start only when this module IS the process entry point, so importing it to
+ * reach `app` (as the route tests do) does not bind the configured port.
  *
- * Without the guard, importing this file to reach `app` binds the configured
- * port as a side effect, which is why the route branches had no tests: there was
- * no way to drive a handler without standing up a real server on a real port.
- * Two credential guards shipped untested for exactly that reason, and QA proved
- * it by disabling each in turn and watching the suite stay green.
- *
- * Compared against argv[1] through pathToFileURL so the two are the same KIND of
- * string — `import.meta.url` is a file: URL and argv[1] is a path, and
- * comparing them directly is a bug that only shows up on the platform whose
- * separator differs.
- *
- * And through realpathSync, which is the part I got wrong first: package.json
- * publishes this file as the `insforge-mcp-server` bin, npm installs bins as
- * SYMLINKS, and Node resolves symlinks for `import.meta.url` but not for
- * argv[1]. So the naive comparison was false when launched by its own installed
- * name, and the server silently did not start — no error, no log, nothing to
- * grep for. The container was safe because its start script names the file
- * directly, which is exactly why testing only that form proved nothing about
- * the published binary.
+ * Compared through pathToFileURL because `import.meta.url` is a file: URL and
+ * argv[1] is a path. And through realpathSync because npm installs the
+ * `insforge-mcp-server` bin as a symlink, and Node resolves symlinks for
+ * `import.meta.url` but not for argv[1]: without it the server silently does
+ * not start when launched by its installed name.
  */
 const entryPath = process.argv[1];
 let isEntryPoint = false;
