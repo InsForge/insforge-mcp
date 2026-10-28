@@ -79,7 +79,7 @@
     "@types/archiver": "^7.0.0",
     "@types/express": "^5.0.3",
     "@types/node": "^20.10.5",
-    "@vitest/coverage-v8": "^4.1.11",
+    "@vitest/coverage-v8": "^4.1.12",
     "eslint": "^10.0.3",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.5",
@@ -90,6 +90,6 @@
     "typescript": "^5.3.3",
     "typescript-eslint": "^8.57.1",
     "vite": "^8.1.6",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
   }
 }
