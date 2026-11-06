@@ -11,14 +11,14 @@ import {
   createDeploymentResponseSchema,
   createDirectDeploymentResponseSchema,
   startDeploymentRequestSchema,
-} from '@insforge/shared-schemas';
+} from './schemas.js';
 import type {
   CreateDeploymentResponse,
   CreateDirectDeploymentResponse,
   DeploymentManifestFile,
   DeploymentManifestFileEntry,
   StartDeploymentRequest,
-} from '@insforge/shared-schemas';
+} from './schemas.js';
 import type { RegisterContext } from './types.js';
 import { shellEsc } from './utils.js';
 

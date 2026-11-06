@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import fetch from 'node-fetch';
 import { handleApiResponse, formatSuccessMessage } from '../response-handler.js';
-import { docTypeSchema, sdkFeatureSchema, sdkLanguageSchema } from '@insforge/shared-schemas';
+import { docTypeSchema, sdkFeatureSchema, sdkLanguageSchema } from './schemas.js';
 import type { RegisterContext } from './types.js';
 
 export function registerDocsTools(ctx: RegisterContext): void {
