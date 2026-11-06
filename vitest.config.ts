@@ -16,10 +16,5 @@ export default defineConfig({
       reporter: ['text', 'json', 'html'],
       exclude: ['node_modules/', 'dist/'],
     },
-    server: {
-      deps: {
-        inline: [/@insforge\/shared-schemas/],
-      },
-    },
   },
 });

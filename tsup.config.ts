@@ -9,7 +9,6 @@ export default defineConfig({
   banner: {
     js: '#!/usr/bin/env node',
   },
-  noExternal: ['@insforge/shared-schemas'],
   external: ['@modelcontextprotocol/sdk', 'commander', 'node-fetch', 'zod', 'express', 'mixpanel'],
   clean: true,
 });
