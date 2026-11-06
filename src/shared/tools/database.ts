@@ -11,7 +11,7 @@ import {
   RawSQLRequest,
   rawSQLRequestSchema,
   bulkUpsertRequestSchema,
-} from '@insforge/shared-schemas';
+} from './schemas.js';
 import type { RegisterContext } from './types.js';
 import { shellEsc } from './utils.js';
 
