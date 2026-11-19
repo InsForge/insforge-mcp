@@ -4,7 +4,7 @@ import { createHash } from 'crypto';
 import { promises as fs, createWriteStream, createReadStream } from 'fs';
 import { tmpdir } from 'os';
 import { join, relative, sep } from 'path';
-import archiver from 'archiver';
+import { ZipArchive } from 'archiver';
 import FormData from 'form-data';
 import { handleApiResponse, formatSuccessMessage } from '../response-handler.js';
 import {
@@ -816,7 +816,7 @@ Run each step in order. If any step fails, do not proceed to the next step.`;
 
             try {
               await new Promise<void>((resolve, reject) => {
-                const archive = archiver('zip', { zlib: { level: 9 } });
+                const archive = new ZipArchive({ zlib: { level: 9 } });
                 const output = createWriteStream(tmpZipPath);
 
                 output.on('close', resolve);
